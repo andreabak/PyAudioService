@@ -3,7 +3,7 @@ import audioop
 import subprocess
 import time
 from collections import deque
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field as dataclass_field
 from threading import Event
 from typing import List, MutableMapping, Any, Optional, Union
@@ -49,7 +49,8 @@ class AudioRecorder:
             pcm_format = DEFAULT_FORMAT
         self._pcm_format: PCMFormat = pcm_format
         if encoder_options is None:
-            self._encoder_options: MutableMapping[str, Any] = self.DEFAULT_ENCODER_OPTIONS
+            encoder_options = self.DEFAULT_ENCODER_OPTIONS
+        self._encoder_options: MutableMapping[str, Any] = encoder_options
 
         self._time_frames: deque[StreamBuffersTimeFrame] = deque()
         self._frame_size: int = CHUNK_FRAMES
@@ -67,6 +68,14 @@ class AudioRecorder:
 
     def stop(self) -> None:
         self._stop_event.set()
+
+    @contextmanager
+    def record(self) -> None:
+        self.start()
+        try:
+            yield
+        finally:
+            self.stop()
 
     async def start_recording(self):
         ffmpeg_spec: ffmpeg.Stream = ffmpeg.input('pipe:', **self.INTERNAL_FORMAT.ffmpeg_args) \
@@ -115,8 +124,8 @@ class AudioRecorder:
                         await self._save_time_frame(self._time_frames.popleft())
 
                     sleep_delay: float = current_tf_time - time.monotonic() + time_step
-                    if (time_shift := time_step - sleep_delay) > time_step * 0.9:
-                        print(f'Got some {time_shift*1000:.2f}ms of time shift on recording loop')
+                    if (time_shift := time_step - sleep_delay) > time_step:
+                        self.__log.debug(f'Got some {time_shift*1000:.2f}ms of time shift on recording loop')
                     await asyncio.sleep(sleep_delay)
                     last_tf_time = current_tf_time
         finally:
