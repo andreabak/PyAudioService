@@ -156,7 +156,7 @@ PyAudioStreamCallbackReturn = Tuple[Optional[bytes], int]
 PyAudioStreamCallback = Callable[[Optional[bytes], int, PyAudioStreamTimeInfo, int],
                                  PyAudioStreamCallbackReturn]
 BufferReadCallback = Callable[[int], bytes]
-BufferWriteCallback = Callable[[bytes], None]
+BufferWriteCallback = Callable[[bytes, PCMFormat], None]
 
 
 class FormatConverter:
@@ -323,7 +323,7 @@ class InputStreamHandler(StreamHandler):
                              time_info: PyAudioStreamTimeInfo, status: int) -> bytes:
         audio_data: bytes = in_data
         if self.write_callback is not None and callable(self.write_callback):
-            self.write_callback(audio_data)
+            self.write_callback(audio_data, self.pcm_format)
         return audio_data
 
 
@@ -359,6 +359,9 @@ class BusListenerHandle:
 
 @custom_log(component='AUDIO')
 class AudioService(BackgroundService):
+    CHUNK_FRAMES: int = CHUNK_FRAMES
+    DEFAULT_FORMAT: PCMFormat = DEFAULT_FORMAT
+
     BUS_OUTPUT: str = 'output'
     BUS_INPUT: str = 'input'
 
@@ -442,7 +445,7 @@ class AudioService(BackgroundService):
             direction_kwargs = dict(output=True, output_device_index=self.output_device_index)
         else:
             raise AttributeError(f'Invalid direction for PyAudio stream: {direction}')
-        with closing(self._pa.open(**stream_handler.pcm_format.pyaudio_args, frames_per_buffer=CHUNK_FRAMES,
+        with closing(self._pa.open(**stream_handler.pcm_format.pyaudio_args, frames_per_buffer=self.CHUNK_FRAMES,
                                    **direction_kwargs, stream_callback=stream_handler.pa_callback)) as stream:
             stream.start_stream()
             while stream.is_active():
@@ -458,7 +461,9 @@ class AudioService(BackgroundService):
     def audio_input(self, write_callback: Optional[BufferWriteCallback] = None,
                     pcm_format: Optional[PCMFormat] = None) -> InputStreamHandler:
         self.ensure_running()
-        stream_handler = InputStreamHandler(audio_service=self, write_callback=write_callback, pcm_format=pcm_format)
+        stream_handler: InputStreamHandler = InputStreamHandler(audio_service=self,
+                                                                write_callback=write_callback,
+                                                                pcm_format=pcm_format)
         self._loop.create_task(self._pa_acquire(stream_handler=stream_handler))
         try:
             yield stream_handler
@@ -480,7 +485,7 @@ class AudioService(BackgroundService):
     async def _play_ffmpeg(self, filepath: str, stream_handler: StreamHandler,
                            pcm_format: Optional[PCMFormat] = None) -> None:
         if pcm_format is None:
-            pcm_format = DEFAULT_FORMAT
+            pcm_format = self.DEFAULT_FORMAT
         ffmpeg_spec: ffmpeg.Stream = ffmpeg.input(filepath).output('pipe:', **pcm_format.ffmpeg_args)
         ffmpeg_args: List[str] = ffmpeg.compile(ffmpeg_spec, 'ffmpeg')
         ffmpeg_process: subprocess.Popen = subprocess.Popen(args=ffmpeg_args, bufsize=0, text=False,
@@ -499,9 +504,13 @@ class AudioService(BackgroundService):
 
     def play_file(self, filepath: str) -> OutputStreamHandler:
         self.ensure_running()
-        stream_handler = OutputStreamHandler(audio_service=self)
+        stream_handler: OutputStreamHandler = OutputStreamHandler(audio_service=self)
         self._loop.create_task(self._play_ffmpeg(filepath=filepath, stream_handler=stream_handler))
         return stream_handler
+
+    def play_file_blocking(self, filepath: str) -> None:
+        stream_handler: OutputStreamHandler = self.play_file(filepath)
+        stream_handler.done_event.wait()
 
     # TODO: Implement play from buffer instead of file
 

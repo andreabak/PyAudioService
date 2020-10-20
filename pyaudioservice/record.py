@@ -128,6 +128,7 @@ class AudioRecorder:
         self._ffmpeg_process.stdin.close()
 
     async def _save_time_frame(self, time_frame: StreamBuffersTimeFrame) -> None:
+        # TODO: Try bake calculations beforehand somewhere, without making code unreadable
         internal_fmt_channels = self.INTERNAL_FORMAT.channels
         internal_fmt_numpy = self.INTERNAL_FORMAT.sample_fmt.numpy
         # Okay...
