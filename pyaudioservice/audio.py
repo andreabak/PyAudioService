@@ -447,12 +447,16 @@ class AudioService(BackgroundService):
             raise AttributeError(f'Invalid direction for PyAudio stream: {direction}')
         with closing(self._pa.open(**stream_handler.pcm_format.pyaudio_args, frames_per_buffer=self.CHUNK_FRAMES,
                                    **direction_kwargs, stream_callback=stream_handler.pa_callback)) as stream:
-            stream.start_stream()
-            while stream.is_active():
-                await asyncio.sleep(0.02)
-            stream.stop_stream()
-            stream_handler.done_event.set()
-            stream_handler.stop_event.set()
+            try:
+                stream.start_stream()
+                try:
+                    while stream.is_active() and not stream_handler.stop_event.is_set():
+                        await asyncio.sleep(0.02)
+                finally:
+                    stream.stop_stream()
+            finally:
+                stream_handler.done_event.set()
+                stream_handler.stop_event.set()
 
     async def _pa_acquire(self, stream_handler: StreamHandler) -> None:
         await self._pa_stream(stream_handler, StreamDirection.INPUT)
@@ -497,8 +501,15 @@ class AudioService(BackgroundService):
 
         stream_handler.read_callback = read_pipe
         stream_handler.pcm_format = pcm_format
-        await self._pa_playback(stream_handler)
-        ffmpeg_retcode: Optional[int] = ffmpeg_process.poll()
+        playback_task: asyncio.Task = self._loop.create_task(self._pa_playback(stream_handler))
+        # TODO: Check ffmpeg retcode
+        ffmpeg_retcode: Optional[int]
+        while True:
+            ffmpeg_retcode = ffmpeg_process.poll()
+            if playback_task.done() or ffmpeg_retcode is not None:
+                stream_handler.stop_event.set()
+                break
+            await asyncio.sleep(0.1)
         if ffmpeg_retcode is None:
             ffmpeg_process.kill()
 
@@ -510,7 +521,8 @@ class AudioService(BackgroundService):
 
     def play_file_blocking(self, filepath: str) -> None:
         stream_handler: OutputStreamHandler = self.play_file(filepath)
-        stream_handler.done_event.wait()
+        while not stream_handler.done_event.is_set():
+            stream_handler.done_event.wait(timeout=10.0)
 
     # TODO: Implement play from buffer instead of file
 
