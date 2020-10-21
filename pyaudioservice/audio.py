@@ -9,17 +9,18 @@ import uuid
 import wave
 from abc import ABC, abstractmethod
 from collections import namedtuple
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, asynccontextmanager
 from dataclasses import dataclass, field as dataclass_field
+from functools import partial
 from inspect import iscoroutinefunction
 from threading import Event, Thread
-from typing import Callable, TypedDict, Optional, Tuple, List, MutableMapping, Any, Union, Awaitable
+from typing import Callable, TypedDict, Optional, Tuple, List, MutableMapping, Any, Union, Awaitable, Protocol
 
 import ffmpeg
 import pyaudio
 import numpy as np
 
-from ..common import BackgroundService, TimestampType
+from ..common import BackgroundService, TimestampType, chunked
 from ..logger import custom_log
 
 
@@ -274,13 +275,19 @@ class StreamHandler(ABC):
             return None, pyaudio.paComplete
         stream_buffer: StreamBuffer = StreamBuffer(audio_data, start_offset=self._done_frames, stream_handler=self)
         if not stream_buffer.check_size():
-            print('Got bad size')  # FIXME: Better info, log, maybe raise
+            self._audio_service.logger.debug(f'Audio buffer has bad size '
+                                             f'(expected {len(audio_data)} % {self.pcm_format.width})')
         self._audio_service.route_buffer(stream_buffer)
         self._done_frames += len(audio_data) / self.pcm_format.width
-        # TODO: If PyAudio gets less frames than requested, it stops the stream. Add sanity checks to feeders?
-        return audio_data, pyaudio.paContinue
-
-    # TODO: Implement input streams
+        if self.direction == StreamDirection.INPUT:
+            return None, pyaudio.paContinue
+        elif self.direction == StreamDirection.OUTPUT:
+            # If PyAudio gets less frames than requested, it stops the stream. Setting events just in case
+            assume_complete: bool = stream_buffer.frames < frame_count
+            pa_flag: int = pyaudio.paComplete if assume_complete else pyaudio.paContinue
+            if assume_complete:
+                self._done_event.set()
+            return audio_data, pa_flag
 
     @property
     def bus(self) -> str:
@@ -357,6 +364,10 @@ class BusListenerHandle:
     uuid: str = dataclass_field(default_factory=lambda: uuid.uuid1().hex, compare=True, hash=True)
 
 
+class PlaybackCallable(Protocol):
+    def __call__(self, *args, stream_handler: OutputStreamHandler, **kwargs) -> Awaitable: ...
+
+
 @custom_log(component='AUDIO')
 class AudioService(BackgroundService):
     CHUNK_FRAMES: int = CHUNK_FRAMES
@@ -411,7 +422,7 @@ class AudioService(BackgroundService):
         if listener_handle in self._bus_listeners:
             self._bus_listeners.remove(listener_handle)
         else:
-            self.__log.warning('Attempted to remove unregistered bus listener')  # TODO: Context info
+            self.__log.warning(f'Attempted to remove unregistered bus listener: {repr(listener_handle)}')
 
     @contextmanager
     def bus_listener(self, bus_name: str, callback: BusListenerCallback):
@@ -421,10 +432,6 @@ class AudioService(BackgroundService):
         finally:
             self.unregister_bus_listener(listener_handle)
 
-    # TODO: Review model:
-    #       Use buses
-    #       Playback/recording send audio buffers to a certain bus (default 2 buses, input, output)
-    #       Recorders or other consumers "patch into" the bus to receive the buffers data
     def route_buffer(self, stream_buffer: StreamBuffer):
         for listener_handle in self._bus_listeners:
             if listener_handle.bus_name == stream_buffer.stream_handler.bus:
@@ -486,47 +493,89 @@ class AudioService(BackgroundService):
             stream_handler.pcm_format = pcm_format
             await self._pa_playback(stream_handler)
 
-    async def _play_ffmpeg(self, filepath: str, stream_handler: StreamHandler,
-                           pcm_format: Optional[PCMFormat] = None) -> None:
-        if pcm_format is None:
-            pcm_format = self.DEFAULT_FORMAT
-        ffmpeg_spec: ffmpeg.Stream = ffmpeg.input(filepath).output('pipe:', **pcm_format.ffmpeg_args)
+    @asynccontextmanager
+    async def _ffmpeg_decoder(self, input_args: MutableMapping[str, Any], pcm_format: PCMFormat,
+                              stream_handler: OutputStreamHandler, pipe_stdin: bool):
+        ffmpeg_spec: ffmpeg.Stream = ffmpeg.input(**input_args).output('pipe:', **pcm_format.ffmpeg_args)
         ffmpeg_args: List[str] = ffmpeg.compile(ffmpeg_spec, 'ffmpeg')
         ffmpeg_process: subprocess.Popen = subprocess.Popen(args=ffmpeg_args, bufsize=0, text=False,
+                                                            stdin=subprocess.PIPE if pipe_stdin else subprocess.DEVNULL,
                                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-        def read_pipe(frame_count: int) -> bytes:
+        def read_stdout_pipe(frame_count: int) -> bytes:
             nonlocal ffmpeg_process
             return ffmpeg_process.stdout.read(frame_count * pcm_format.width)
 
-        stream_handler.read_callback = read_pipe
+        stream_handler.read_callback = read_stdout_pipe
         stream_handler.pcm_format = pcm_format
         playback_task: asyncio.Task = self._loop.create_task(self._pa_playback(stream_handler))
-        # TODO: Check ffmpeg retcode
-        ffmpeg_retcode: Optional[int]
-        while True:
-            ffmpeg_retcode = ffmpeg_process.poll()
-            if playback_task.done() or ffmpeg_retcode is not None:
-                stream_handler.stop_event.set()
-                break
-            await asyncio.sleep(0.1)
-        if ffmpeg_retcode is None:
-            ffmpeg_process.kill()
 
-    def play_file(self, filepath: str) -> OutputStreamHandler:
+        try:
+            yield ffmpeg_process
+
+        except BaseException as exc:
+            self.__log.warning(f'Got exception in FFmpeg decoder context: {exc}')
+            raise
+
+        finally:
+            ffmpeg_retcode: Optional[int]
+            while True:
+                ffmpeg_retcode = ffmpeg_process.poll()
+                if playback_task.done() or ffmpeg_retcode is not None:
+                    stream_handler.stop_event.set()
+                    break
+                await asyncio.sleep(0.1)
+            if ffmpeg_retcode is None:
+                for _ in range(20):
+                    ffmpeg_retcode = ffmpeg_process.poll()
+                    if ffmpeg_retcode is not None:
+                        break
+                    await asyncio.sleep(0.1)
+                else:
+                    self.__log.debug('FFmpeg still running 2.0s after output stream ended, killing it')
+                    ffmpeg_process.kill()
+                    return
+            if ffmpeg_retcode != 0:  # TODO: Retrieve stderr?
+                self.__log.debug(f'FFmpeg exited with return code {ffmpeg_retcode}')
+
+    async def _play_ffmpeg_bytes(self, audio_data: bytes, data_pcm_format: PCMFormat,
+                                 stream_handler: OutputStreamHandler, pcm_format: Optional[PCMFormat] = None) -> None:
+        if pcm_format is None:
+            pcm_format = self.DEFAULT_FORMAT
+        input_args: MutableMapping[str, Any] = dict(filename='pipe:', **data_pcm_format.ffmpeg_args)
+        async with self._ffmpeg_decoder(input_args, pcm_format, stream_handler, pipe_stdin=True) as ffmpeg_process:
+            chunk_size: int = ((self.CHUNK_FRAMES * data_pcm_format.rate) // pcm_format.rate) * data_pcm_format.width
+            # Feed audio data to ffmpeg stdin
+            for input_chunk in chunked(audio_data, chunk_size):
+                ffmpeg_process.stdin.write(input_chunk)
+                await asyncio.sleep(0)
+            ffmpeg_process.stdin.close()
+
+    async def _play_ffmpeg_file(self, filepath: str,
+                                stream_handler: OutputStreamHandler, pcm_format: Optional[PCMFormat] = None) -> None:
+        if pcm_format is None:
+            pcm_format = self.DEFAULT_FORMAT
+        input_args: MutableMapping[str, Any] = dict(filename=filepath)
+        async with self._ffmpeg_decoder(input_args, pcm_format, stream_handler, pipe_stdin=False):
+            pass
+
+    def _play_stream(self, playback_callable: PlaybackCallable, blocking: bool) -> Optional[OutputStreamHandler]:
         self.ensure_running()
         stream_handler: OutputStreamHandler = OutputStreamHandler(audio_service=self)
-        self._loop.create_task(self._play_ffmpeg(filepath=filepath, stream_handler=stream_handler))
-        return stream_handler
+        self._loop.create_task(playback_callable(stream_handler=stream_handler))
+        if not blocking:
+            return stream_handler
+        else:
+            stream_handler.done_event.wait()
 
-    def play_file_blocking(self, filepath: str) -> None:
-        stream_handler: OutputStreamHandler = self.play_file(filepath)
-        while not stream_handler.done_event.is_set():
-            stream_handler.done_event.wait(timeout=10.0)
+    def play_bytes(self, audio_data: bytes, data_pcm_format: PCMFormat,
+                   blocking: bool = True) -> Optional[OutputStreamHandler]:
+        # noinspection PyTypeChecker
+        playback_callable: PlaybackCallable = partial(self._play_ffmpeg_bytes,
+                                                      audio_data=audio_data, data_pcm_format=data_pcm_format)
+        return self._play_stream(playback_callable, blocking=blocking)
 
-    # TODO: Implement play from buffer instead of file
-
-    # TODO: Implement input streams
-    #       Create function to attach input stream to a bus (w/ ctx manager?)
-    #           Start streaming stuff to the bus, discard chunks if no listener
-    #
+    def play_file(self, filepath: str, blocking: bool = True) -> Optional[OutputStreamHandler]:
+        # noinspection PyTypeChecker
+        playback_callable: PlaybackCallable = partial(self._play_ffmpeg_file, filepath=filepath)
+        return self._play_stream(playback_callable, blocking=blocking)
