@@ -2,6 +2,13 @@
 
 from abc import ABC, abstractmethod
 from threading import Event, Thread
+from typing import Sequence
+
+
+def chunked(seq: Sequence, n: int):
+    """Yield successive n-sized chunks from seq."""
+    for i in range(0, len(seq), n):
+        yield seq[i:i + n]
 
 
 class BackgroundService(ABC):
