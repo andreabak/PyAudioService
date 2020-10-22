@@ -8,26 +8,25 @@ import time
 import uuid
 import wave
 from abc import ABC, abstractmethod
-from collections import namedtuple
 from contextlib import closing, contextmanager, asynccontextmanager
 from dataclasses import dataclass, field as dataclass_field
 from functools import partial
 from inspect import iscoroutinefunction
 from threading import Event, Thread
-from typing import Callable, TypedDict, Optional, Tuple, List, MutableMapping, Any, Union, Awaitable, Protocol
+from typing import Callable, TypedDict, Optional, Tuple, List, MutableMapping, Any, Union, Awaitable, Protocol, \
+    IO, Iterator
 
 import ffmpeg
 import pyaudio
-import numpy as np
 
+from .datatypes import PCMSampleFormat, PCMFormat, AudioDescriptor, AudioFileDescriptor, AudioBytesDescriptor, \
+    AudioStreamDescriptor, AudioPCMDescriptor, AudioEncodedDescriptor
 from ..common import BackgroundService, TimestampType, chunked
 from ..logger import custom_log
 
 
 __all__ = [
     'CHUNK_FRAMES',
-    'PCMSampleFormat',
-    'PCMFormat',
     'DEFAULT_FORMAT',
     'BufferWriteCallback',
     'BufferReadCallback',
@@ -41,108 +40,6 @@ __all__ = [
 
 
 CHUNK_FRAMES = 1764  # 40ms @ 44100Hz
-
-
-PCMSampleFormatSpec = namedtuple('PCMSampleFormatSpec', 'width, portaudio_value, ffmpeg_name, numpy_type')
-
-
-class PCMSampleFormat(enum.Enum):
-    """
-    An enum class to represent PCM sample formats. Enum names correspond to ffmpeg naming, values to portaudio
-    """
-    float32 = PCMSampleFormatSpec(4, pyaudio.paFloat32, 'f32le', np.float32)  # floating-point 32-bit little-endian
-    int32 = PCMSampleFormatSpec(4, pyaudio.paInt32, 's32le', np.int32)        # signed 32-bit little-endian
-    int24 = PCMSampleFormatSpec(3, pyaudio.paInt24, 's24le', None)            # signed 24-bit little-endian
-    int16 = PCMSampleFormatSpec(2, pyaudio.paInt16, 's16le', np.int16)        # signed 16-bit little-endian
-    int8 = PCMSampleFormatSpec(1, pyaudio.paInt8, 's8', np.int8)              # signed 8-bit
-    uint8 = PCMSampleFormatSpec(1, pyaudio.paUInt8, 'u8', np.uint8)           # unsigned 8-bit
-
-    @property
-    def portaudio(self) -> int:
-        return self.value.portaudio_value
-
-    @property
-    def ffmpeg(self) -> str:
-        return self.value.ffmpeg_name
-
-    @property
-    def numpy(self) -> np.number:
-        return self.value.numpy_type
-
-    @property
-    def width(self) -> int:
-        return self.value.width
-
-    @classmethod
-    def get_format_from_width(cls, width, unsigned=True) -> PCMSampleFormat:
-        """
-        Returns a PCMSampleFormat enum for the specified `width`.
-        :param width: The desired sample width in bytes (1, 2, 3, or 4)
-        :param unsigned: For 1 byte width, specifies signed or unsigned format.
-        :return: a PCMSampleFormat enum
-        """
-        if width == 1:
-            if unsigned:
-                return cls.uint8
-            else:
-                return cls.int8
-        elif unsigned:
-            raise ValueError(f'Unsigned PCM sample format is supported only for 8-bit')
-        elif width == 2:
-            return cls.int16
-        elif width == 3:
-            return cls.int24
-        elif width == 4:
-            return cls.float32
-        else:
-            raise ValueError(f"Invalid or unsupported PCM sample width: {width} ({width*8}-bit)")
-
-    def __str__(self) -> str:
-        n_type: str = ' floating-point' if self == self.float32 else (' unsigned' if self == self.uint8 else '')
-        return f'{self.value.width * 8}-bit{n_type}'
-
-
-class PyAudioStreamFormatArgs(TypedDict):
-    rate: int
-    format: int
-    channels: int
-
-
-class FFMpegFormatArgs(TypedDict):
-    ar: int  # Sampling frequency (rate) in Hz
-    f: str   # Format
-    ac: int  # Audio channels
-
-
-@dataclass(frozen=True)
-class PCMFormat:
-    rate: int
-    sample_fmt: PCMSampleFormat
-    channels: int
-
-    @property
-    def sample_duration(self) -> float:
-        return 1.0 / self.rate
-
-    @property
-    def pyaudio_args(self) -> PyAudioStreamFormatArgs:
-        return PyAudioStreamFormatArgs(rate=self.rate, format=self.sample_fmt.portaudio, channels=self.channels)
-
-    @property
-    def ffmpeg_args(self) -> FFMpegFormatArgs:
-        return FFMpegFormatArgs(ar=self.rate, f=self.sample_fmt.ffmpeg, ac=self.channels)
-
-    @property
-    def ffmpeg_args_nofmt(self) -> MutableMapping[str, Any]:
-        return dict(ar=self.rate, ac=self.channels)
-
-    @property
-    def width(self) -> int:
-        return self.sample_fmt.width * self.channels
-
-    def __str__(self) -> str:
-        return f'{self.rate}Hz {self.sample_fmt} {self.channels}ch'
-
 
 DEFAULT_FORMAT: PCMFormat = PCMFormat(rate=44100, sample_fmt=PCMSampleFormat.int16, channels=1)
 
@@ -247,6 +144,7 @@ class StreamHandler(ABC):
         self._done_event.clear()
         self._stop_event: Event = Event()
         self._stop_event.clear()
+        self.stream_error: Optional[BaseException] = None
         self._start_time: Optional[TimestampType] = None
         self._done_frames: int = 0
 
@@ -292,6 +190,10 @@ class StreamHandler(ABC):
     @property
     def bus(self) -> str:
         return self._bus
+
+    @property
+    def success(self) -> bool:
+        return self._done_event.is_set() and self.stream_error is None
 
     @property
     def done_event(self) -> Event:
@@ -461,6 +363,12 @@ class AudioService(BackgroundService):
                         await asyncio.sleep(0.02)
                 finally:
                     stream.stop_stream()
+            except SystemExit:
+                pass
+            except BaseException as exc:
+                self.__log.warning(f'Error in PyAudio stream: {exc}', exc_info=True)
+                stream_handler.stream_error = exc
+                raise
             finally:
                 stream_handler.done_event.set()
                 stream_handler.stop_event.set()
@@ -478,6 +386,12 @@ class AudioService(BackgroundService):
         self._loop.create_task(self._pa_acquire(stream_handler=stream_handler))
         try:
             yield stream_handler
+        except SystemExit:
+            pass
+        except BaseException as exc:
+            self.__log.warning(f'Error in input PyAudio stream: {exc}', exc_info=True)
+            stream_handler.stream_error = exc
+            raise
         finally:
             stream_handler.stop_event.set()
 
@@ -504,7 +418,15 @@ class AudioService(BackgroundService):
 
         def read_stdout_pipe(frame_count: int) -> bytes:
             nonlocal ffmpeg_process
-            return ffmpeg_process.stdout.read(frame_count * pcm_format.width)
+            # Ensuring we don't read less than what requested, until output has finished
+            target_bytes: int = frame_count * pcm_format.width
+            buffer: bytes = b''
+            while (bytes_to_read := target_bytes - len(buffer)) > 0:
+                read_bytes: bytes = ffmpeg_process.stdout.read(bytes_to_read)
+                if not read_bytes:
+                    break
+                buffer += read_bytes
+            return buffer
 
         stream_handler.read_callback = read_stdout_pipe
         stream_handler.pcm_format = pcm_format
@@ -512,11 +434,12 @@ class AudioService(BackgroundService):
 
         try:
             yield ffmpeg_process
-
+        except SystemExit:
+            pass
         except BaseException as exc:
             self.__log.warning(f'Got exception in FFmpeg decoder context: {exc}')
+            stream_handler.stream_error = exc
             raise
-
         finally:
             ffmpeg_retcode: Optional[int]
             while True:
@@ -532,21 +455,50 @@ class AudioService(BackgroundService):
                         break
                     await asyncio.sleep(0.1)
                 else:
-                    self.__log.debug('FFmpeg still running 2.0s after output stream ended, killing it')
+                    error_msg: str = 'FFmpeg still running 2.0s after output stream ended, killing it'
+                    self.__log.debug(error_msg)
                     ffmpeg_process.kill()
+                    stream_handler.stream_error = RuntimeError(error_msg)
                     return
             if ffmpeg_retcode != 0:  # TODO: Retrieve stderr?
-                self.__log.debug(f'FFmpeg exited with return code {ffmpeg_retcode}')
+                error_msg: str = f'FFmpeg exited with return code {ffmpeg_retcode}'
+                self.__log.debug(error_msg)
+                stream_handler.stream_error = RuntimeError(error_msg)
 
-    async def _play_ffmpeg_bytes(self, audio_data: bytes, data_pcm_format: PCMFormat,
-                                 stream_handler: OutputStreamHandler, pcm_format: Optional[PCMFormat] = None) -> None:
+    async def _play_ffmpeg_piped(self, audio: Union[bytes, IO], stream_handler: OutputStreamHandler,
+                                 codec: Optional[str] = None, data_pcm_format: Optional[PCMFormat] = None,
+                                 pcm_format: Optional[PCMFormat] = None) -> None:
         if pcm_format is None:
             pcm_format = self.DEFAULT_FORMAT
-        input_args: MutableMapping[str, Any] = dict(filename='pipe:', **data_pcm_format.ffmpeg_args)
+        input_args: MutableMapping[str, Any] = dict(filename='pipe:')
+        if codec is not None:
+            input_args['acodec'] = codec
+        if data_pcm_format is not None:
+            input_args.update(**data_pcm_format.ffmpeg_args)
         async with self._ffmpeg_decoder(input_args, pcm_format, stream_handler, pipe_stdin=True) as ffmpeg_process:
-            chunk_size: int = ((self.CHUNK_FRAMES * data_pcm_format.rate) // pcm_format.rate) * data_pcm_format.width
+            chunk_size: int
+            if data_pcm_format is not None:
+                chunk_size = ((self.CHUNK_FRAMES * data_pcm_format.rate) // pcm_format.rate) * data_pcm_format.width
+            else:
+                chunk_size = self.CHUNK_FRAMES
             # Feed audio data to ffmpeg stdin
-            for input_chunk in chunked(audio_data, chunk_size):
+            is_stream: bool = hasattr(audio, 'read')
+            if not is_stream:
+                assert isinstance(audio, bytes)
+                chunks_generator: Iterator[bytes] = chunked(audio, chunk_size)
+            while True:
+                # TODO: Monitor stream_handler events for premature termination
+                input_chunk: bytes
+                if is_stream:
+                    input_chunk = audio.read(chunk_size)  # FIXME: Careful with blocking reads within async
+                    if not input_chunk:
+                        audio.close()
+                        break
+                else:
+                    try:
+                        input_chunk = next(chunks_generator)
+                    except StopIteration:
+                        break
                 ffmpeg_process.stdin.write(input_chunk)
                 await asyncio.sleep(0)
             ffmpeg_process.stdin.close()
@@ -559,23 +511,50 @@ class AudioService(BackgroundService):
         async with self._ffmpeg_decoder(input_args, pcm_format, stream_handler, pipe_stdin=False):
             pass
 
-    def _play_stream(self, playback_callable: PlaybackCallable, blocking: bool) -> Optional[OutputStreamHandler]:
+    def _play_stream(self, playback_callable: PlaybackCallable, blocking: bool) -> OutputStreamHandler:
         self.ensure_running()
         stream_handler: OutputStreamHandler = OutputStreamHandler(audio_service=self)
         self._loop.create_task(playback_callable(stream_handler=stream_handler))
-        if not blocking:
-            return stream_handler
-        else:
+        if blocking:
             stream_handler.done_event.wait()
+        return stream_handler
 
-    def play_bytes(self, audio_data: bytes, data_pcm_format: PCMFormat,
-                   blocking: bool = True) -> Optional[OutputStreamHandler]:
+    def play_data(self, audio: Union[bytes, IO],
+                  codec: Optional[str] = None, data_pcm_format: Optional[PCMFormat] = None,
+                  blocking: bool = True) -> OutputStreamHandler:
         # noinspection PyTypeChecker
-        playback_callable: PlaybackCallable = partial(self._play_ffmpeg_bytes,
-                                                      audio_data=audio_data, data_pcm_format=data_pcm_format)
+        playback_callable: PlaybackCallable = partial(self._play_ffmpeg_piped, audio=audio,
+                                                      codec=codec, data_pcm_format=data_pcm_format)
         return self._play_stream(playback_callable, blocking=blocking)
 
-    def play_file(self, filepath: str, blocking: bool = True) -> Optional[OutputStreamHandler]:
+    def play_file(self, filepath: str, blocking: bool = True) -> OutputStreamHandler:
         # noinspection PyTypeChecker
         playback_callable: PlaybackCallable = partial(self._play_ffmpeg_file, filepath=filepath)
         return self._play_stream(playback_callable, blocking=blocking)
+
+    def play_descriptor(self, audio_descriptor: AudioDescriptor, blocking: bool = True) -> OutputStreamHandler:
+        try:
+            if isinstance(audio_descriptor, AudioFileDescriptor):
+                return self.play_file(audio_descriptor.path, blocking=blocking)
+            elif isinstance(audio_descriptor, (AudioBytesDescriptor, AudioStreamDescriptor)):
+                audio: Union[bytes, IO]
+                if isinstance(audio_descriptor, AudioBytesDescriptor):
+                    audio = audio_descriptor.audio_data
+                elif isinstance(audio_descriptor, AudioStreamDescriptor):
+                    audio = audio_descriptor.audio_stream
+                else:
+                    raise SyntaxError(f'wrong class, sanity check failed')
+                if isinstance(audio_descriptor, AudioPCMDescriptor):
+                    return self.play_data(audio,
+                                          data_pcm_format=audio_descriptor.pcm_format,
+                                          blocking=blocking)
+                elif isinstance(audio_descriptor, AudioEncodedDescriptor):
+                    return self.play_data(audio,
+                                          codec=audio_descriptor.codec,
+                                          blocking=blocking)
+                else:
+                    raise ValueError(f'unknown or unhandled audio descriptor type')
+            else:
+                raise ValueError(f'unknown or unhandled audio descriptor type')
+        except ValueError as exc:
+            raise ValueError(f'Could not play audio descriptor {repr(audio_descriptor)}: {exc}') from exc

@@ -1,9 +1,11 @@
 """Package with classes and modules related to audio acquisition, playback and recording"""
 
-from . import audio
+from . import datatypes
+from . import service
 from . import record
+from .datatypes import *
 from .record import *
-from .audio import *
+from .service import *
 
 
-__all__ = audio.__all__ + record.__all__
+__all__ = datatypes.__all__ + service.__all__ + record.__all__

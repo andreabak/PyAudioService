@@ -12,8 +12,8 @@ import ffmpeg
 import numpy as np
 
 from ..logger import custom_log
-from .audio import StreamBuffer, PCMFormat, DEFAULT_FORMAT, PCMSampleFormat, AudioService, CHUNK_FRAMES
-
+from .service import StreamBuffer, DEFAULT_FORMAT, AudioService, CHUNK_FRAMES
+from .datatypes import PCMSampleFormat, PCMFormat
 
 __all__ = [
     'AudioRecorder'
