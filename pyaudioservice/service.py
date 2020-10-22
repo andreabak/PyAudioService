@@ -417,14 +417,16 @@ class AudioService(BackgroundService):
                                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
         def read_stdout_pipe(frame_count: int) -> bytes:
-            nonlocal ffmpeg_process
+            nonlocal ffmpeg_process, pcm_format
             # Ensuring we don't read less than what requested, until output has finished
             target_bytes: int = frame_count * pcm_format.width
             buffer: bytes = b''
             while (bytes_to_read := target_bytes - len(buffer)) > 0:
                 read_bytes: bytes = ffmpeg_process.stdout.read(bytes_to_read)
                 if not read_bytes:
-                    break
+                    if not pipe_stdin or ffmpeg_process.stdin.closed:
+                        break
+                    time.sleep(0.5 * (bytes_to_read / pcm_format.width) * pcm_format.sample_duration)
                 buffer += read_bytes
             return buffer
 
@@ -487,7 +489,6 @@ class AudioService(BackgroundService):
                 assert isinstance(audio, bytes)
                 chunks_generator: Iterator[bytes] = chunked(audio, chunk_size)
             while True:
-                # TODO: Monitor stream_handler events for premature termination
                 input_chunk: bytes
                 if is_stream:
                     input_chunk = audio.read(chunk_size)  # FIXME: Careful with blocking reads within async
@@ -499,6 +500,8 @@ class AudioService(BackgroundService):
                         input_chunk = next(chunks_generator)
                     except StopIteration:
                         break
+                if stream_handler.stop_event.is_set():
+                    break
                 ffmpeg_process.stdin.write(input_chunk)
                 await asyncio.sleep(0)
             ffmpeg_process.stdin.close()
