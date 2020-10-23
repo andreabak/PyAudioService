@@ -125,8 +125,8 @@ class AudioRecorder:
                     pass
                 await self._time_frames_cleanup()
             except BrokenPipeError as exc:
-                self.__log.warning(f'Stopped recording: {exc}')
-                return
+                self.__log.info(f'Force stopped recording: {exc}')
+                raise
 
     async def _recording_loop(self) -> None:
         """Internal coroutine that handles the recording loop within `AudioService`'s asyncio loop"""
@@ -149,7 +149,7 @@ class AudioRecorder:
                     time_frame: StreamBuffersTimeFrame = StreamBuffersTimeFrame(start_time=current_tf_time)
                     self._time_frames.append(time_frame)
 
-                    if self._stop_event.is_set():
+                    if self._stop_event.is_set() or self._audio_service.stop_event.is_set():
                         raise SystemExit
 
                     if len(self._time_frames) > self.FRAMES_DELAY:
