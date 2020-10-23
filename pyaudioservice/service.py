@@ -615,7 +615,8 @@ class AudioService(BackgroundService):
         ffmpeg_args: List[str] = ffmpeg.compile(ffmpeg_spec, 'ffmpeg')
         ffmpeg_process: subprocess.Popen = subprocess.Popen(args=ffmpeg_args, bufsize=0, text=False,
                                                             stdin=subprocess.PIPE if pipe_stdin else subprocess.DEVNULL,
-                                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                                            close_fds=True)
 
         def read_stdout_pipe(frame_count: int) -> bytes:
             nonlocal ffmpeg_process, pcm_format
@@ -626,6 +627,8 @@ class AudioService(BackgroundService):
                 read_bytes: bytes = ffmpeg_process.stdout.read(bytes_to_read)
                 if not read_bytes:
                     if not pipe_stdin or ffmpeg_process.stdin.closed:
+                        if ffmpeg_process.stdout and not ffmpeg_process.stdout.closed:
+                            ffmpeg_process.stdout.close()
                         break
                     time.sleep(0.5 * (bytes_to_read / pcm_format.width) * pcm_format.sample_duration)
                 buffer += read_bytes
