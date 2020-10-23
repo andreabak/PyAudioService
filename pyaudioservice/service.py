@@ -382,9 +382,9 @@ async def ffmpeg_subprocess(ffmpeg_spec: ffmpeg.Stream, stdin: Union[int, IO, No
     """
     Async context manager utility method to wrap a FFmpeg process
     :param ffmpeg_spec: a `Stream` object from ffmpeg-python library specifying the runtime options for FFmpeg
-    :param stdin: the stdin arugment for the subprocess call. If omitted, defaults to subprocess.DEVNULL
-    :param stdout: the stdout argument for the subprocess call. If omitted, defaults to subprocess.DEVNULL
-    :param stderr: the stderr argument for the subprocess call. If omitted, defaults to subprocess.DEVNULL
+    :param stdin: the stdin arugment for the subprocess call. If omitted, defaults to `subprocess.DEVNULL`
+    :param stdout: the stdout argument for the subprocess call. If omitted, defaults to `subprocess.DEVNULL`
+    :param stderr: the stderr argument for the subprocess call. If omitted, defaults to `subprocess.DEVNULL`
     :param kill_timeout: the timeout in seconds to wait for the FFmpeg process to end before killing it.
                          If omitted or None, it waits until the FFmpeg process ends on its own.
     :param logger: a logger instance for logging messages, optional
@@ -400,10 +400,23 @@ async def ffmpeg_subprocess(ffmpeg_spec: ffmpeg.Stream, stdin: Union[int, IO, No
     ffmpeg_exec: str = 'ffmpeg'
     ffmpeg_args: List[str] = ffmpeg.get_args(ffmpeg_spec)
     ffmpeg_process: Process = await asyncio.create_subprocess_exec(ffmpeg_exec, *ffmpeg_args,
-                                                                   stdin=stdin, stdout=stdout, stderr=stderr)
+                                                                   stdin=stdin, stdout=stdout, stderr=stderr,
+                                                                   creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+    caught_exception: Optional[BaseException] = None
     try:
         yield ffmpeg_process
+    except BrokenPipeError as exc:
+        if logger:
+            logger.warning(f'FFmpeg pipes broken: {exc}')
+        caught_exception = exc
+    except BaseException as exc:
+        if logger:
+            logger.debug(f'Got exception within FFmpeg context: {exc}')
+        caught_exception = exc
+        raise
     finally:
+        if logger:
+            logger.debug('FFmpeg terminating')
         try:
             ffmpeg_retcode: Optional[int] = await asyncio.wait_for(await ffmpeg_process.wait(), kill_timeout)
         except asyncio.TimeoutError:
@@ -420,6 +433,33 @@ async def ffmpeg_subprocess(ffmpeg_spec: ffmpeg.Stream, stdin: Union[int, IO, No
                     logger.debug(error_msg)
                 if error_callback:
                     error_callback(RuntimeError(error_msg))
+        finally:
+            # noinspection PyProtectedMember,PyUnresolvedReferences
+            if caught_exception is not None or asyncio.get_running_loop()._stopping:
+                if logger:
+                    logger.debug('Force closing subprocess transports')
+
+                # noinspection PyProtectedMember,PyUnresolvedReferences,PyBroadException
+                def close_transport(transported_object: object):
+                    try:
+                        transport = transported_object._transport
+                    except:
+                        pass
+                    else:
+                        try:
+                            transport._call_connection_lost(None)
+                        except:
+                            try:
+                                transport._force_close()
+                            except:
+                                try:
+                                    transport.close()
+                                except:
+                                    pass
+                close_transport(ffmpeg_process.stdin)
+                close_transport(ffmpeg_process.stdout)
+                close_transport(ffmpeg_process.stderr)
+                close_transport(ffmpeg_process)
 
 
 def write_to_async_pipe_sane(process: Process, pipe: Optional[asyncio.StreamWriter], data: bytes) -> None:
@@ -514,6 +554,11 @@ class AudioService(BackgroundService):
         self._pa: pyaudio.PyAudio = pyaudio.PyAudio()
         self._bus_listeners: List[BusListenerHandle] = []
 
+    @property
+    def stop_event(self) -> Event:
+        """The stop event associated with the audio service"""
+        return self._stop_event
+
     def _create_thread(self) -> Thread:
         return Thread(name='AudioThread', target=self._audio_thread_main)
 
@@ -530,6 +575,7 @@ class AudioService(BackgroundService):
         """Main entry point coroutine for the audio service (async)"""
         while True:
             if self._stop_event.is_set():
+                self._loop.stop()
                 raise SystemExit
             await asyncio.sleep(0.1)
 
@@ -714,6 +760,8 @@ class AudioService(BackgroundService):
                 target_bytes: int = frame_count * pcm_format.width
                 buffer: bytes = b''
                 while (bytes_to_read := target_bytes - len(buffer)) > 0:
+                    if self._stop_event.is_set():  # Break on service termination request
+                        break
                     read_coro: Awaitable = read_from_async_pipe_sane(ffmpeg_process, ffmpeg_process.stdout, bytes_to_read)
                     try:
                         read_bytes: bytes = asyncio.run_coroutine_threadsafe(read_coro, self._loop).result()
@@ -737,10 +785,7 @@ class AudioService(BackgroundService):
             except SystemExit:
                 pass
             except BrokenPipeError as exc:
-                self.__log.warning(f'Stopped playback: {exc}')
-            except BaseException as exc:
-                self.__log.warning(f'Got exception in FFmpeg decoder context: {exc}')
-                stream_handler.set_error(exc)
+                self.__log.info(f'Force stopped playback: {exc}')
                 raise
             finally:
                 ffmpeg_retcode: Optional[int]
@@ -782,23 +827,25 @@ class AudioService(BackgroundService):
             if not is_stream:
                 assert isinstance(audio, bytes)
                 chunks_generator: Iterator[bytes] = chunked(audio, chunk_size)
-            while True:
-                input_chunk: bytes
-                if is_stream:
-                    input_chunk = audio.read(chunk_size)  # FIXME: Careful with blocking reads within async
-                    if not input_chunk:
-                        audio.close()
+            try:
+                while True:
+                    input_chunk: bytes
+                    if is_stream:
+                        input_chunk = audio.read(chunk_size)  # FIXME: Careful with blocking reads within async
+                        if not input_chunk:
+                            audio.close()
+                            break
+                    else:
+                        try:
+                            input_chunk = next(chunks_generator)
+                        except StopIteration:
+                            break
+                    if stream_handler.stop_event.is_set() or self._stop_event.is_set():
                         break
-                else:
-                    try:
-                        input_chunk = next(chunks_generator)
-                    except StopIteration:
-                        break
-                if stream_handler.stop_event.is_set():
-                    break
-                write_to_async_pipe_sane(ffmpeg_process, ffmpeg_process.stdin, input_chunk)
-                await asyncio.sleep(sleep_time)
-            ffmpeg_process.stdin.close()
+                    write_to_async_pipe_sane(ffmpeg_process, ffmpeg_process.stdin, input_chunk)
+                    await asyncio.sleep(sleep_time)
+            finally:
+                ffmpeg_process.stdin.close()
 
     async def _play_ffmpeg_file(self, filepath: str,
                                 stream_handler: OutputStreamHandler, pcm_format: Optional[PCMFormat] = None) -> None:
@@ -826,7 +873,8 @@ class AudioService(BackgroundService):
         stream_handler: OutputStreamHandler = OutputStreamHandler(audio_service=self)
         asyncio.run_coroutine_threadsafe(playback_callable(stream_handler=stream_handler), self._loop)
         if blocking:
-            stream_handler.done_event.wait()
+            while not stream_handler.done_event.is_set():
+                time.sleep(0.1)  # Using short sleeps for faster ctrl-c breaking
         return stream_handler
 
     def play_data(self, audio: Union[bytes, IO],
