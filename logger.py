@@ -10,7 +10,10 @@ import atexit
 from blessed import Terminal
 
 
-__all__ = ['log', 'set_log_level', 'custom_log']  # Export logger
+__all__ = ['log', 'set_log_level', 'custom_log', 'LoggerType']  # Export logger
+
+
+LoggerType = Union[logging.Logger, logging.LoggerAdapter]
 
 
 term = Terminal()
