@@ -5,6 +5,7 @@ import audioop
 import os
 import subprocess
 import time
+from asyncio.subprocess import Process
 from collections import deque
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field as dataclass_field
@@ -15,7 +16,8 @@ import ffmpeg
 import numpy as np
 
 from ..logger import custom_log
-from .service import StreamBuffer, DEFAULT_FORMAT, AudioService, CHUNK_FRAMES
+from .service import StreamBuffer, DEFAULT_FORMAT, AudioService, CHUNK_FRAMES, write_to_async_pipe_sane, \
+    ffmpeg_subprocess
 from .datatypes import PCMSampleFormat, PCMFormat
 
 
@@ -78,7 +80,7 @@ class AudioRecorder:
 
         self._time_frames: deque[StreamBuffersTimeFrame] = deque()
         self._frame_size: int = CHUNK_FRAMES
-        self._ffmpeg_process: Optional[subprocess.Popen] = None
+        self._ffmpeg_process: Optional[Process] = None
         self._recording: bool = False
         self._stop_event: Event = Event()
 
@@ -92,7 +94,7 @@ class AudioRecorder:
         self.__log.info(f'Starting recording for {"+".join(self._source_buses)} '
                         f'on {os.path.basename(self._out_file_path)}')
         self._audio_service.ensure_running()
-        self._audio_service.loop.create_task(self._start_recording())
+        asyncio.run_coroutine_threadsafe(self._start_recording(), self._audio_service.loop)
 
     def stop(self) -> None:
         """Stop the audio recording"""
@@ -113,25 +115,18 @@ class AudioRecorder:
                                            .filter('alimiter', attack=10, release=20) \
                                            .output(self._out_file_path,
                                                    **self._pcm_format.ffmpeg_args_nofmt, **self._encoder_options)
-        ffmpeg_args: List[str] = ffmpeg.compile(ffmpeg_spec, 'ffmpeg', overwrite_output=True)
-        self._ffmpeg_process: subprocess.Popen = subprocess.Popen(args=ffmpeg_args, bufsize=0, text=False,
-                                                                  stdout=subprocess.DEVNULL, stdin=subprocess.PIPE,
-                                                                  stderr=subprocess.DEVNULL, close_fds=True)
-        try:
+        ffmpeg_context = ffmpeg_subprocess(ffmpeg_spec, stdin=subprocess.PIPE, kill_timeout=5.0, logger=self.__log)
+        async with ffmpeg_context as ffmpeg_process:
+            self._ffmpeg_process = ffmpeg_process
             try:
-                await self._recording_loop()
-            except SystemExit:
-                pass
-            await self._time_frames_cleanup()
-        except BrokenPipeError as exc:
-            self.__log.warning(f'Stopped recording: {exc}')
-            return
-        while True:
-            self.__log.debug('Waiting for ffmpeg to stop')
-            ffmpeg_retcode: Optional[int] = self._ffmpeg_process.poll()
-            if ffmpeg_retcode is None:
-                await asyncio.sleep(0.1)
-            # TODO: Failsafe to just end?
+                try:
+                    await self._recording_loop()
+                except SystemExit:
+                    pass
+                await self._time_frames_cleanup()
+            except BrokenPipeError as exc:
+                self.__log.warning(f'Stopped recording: {exc}')
+                return
 
     async def _recording_loop(self) -> None:
         """Internal coroutine that handles the recording loop within `AudioService`'s asyncio loop"""
@@ -163,7 +158,7 @@ class AudioRecorder:
                     sleep_delay: float = current_tf_time - time.monotonic() + time_step
                     if (time_shift := time_step - sleep_delay) > time_step:
                         self.__log.debug(f'Got some {time_shift*1000:.2f}ms of time shift on recording loop')
-                    await asyncio.sleep(sleep_delay)
+                    await asyncio.sleep(max(0.0, sleep_delay))
                     last_tf_time = current_tf_time
         finally:
             self._recording = False
@@ -201,15 +196,8 @@ class AudioRecorder:
                 raise NotImplementedError  # TODO: Implement
             cum_buffer += buffer_np
         out_buffer: bytes = cum_buffer.tobytes()
-        # TODO: Detect if stdin.write fails, in case try to retrieve stderr and print it. Do we need async subprocess?
-        if not self._ffmpeg_process.stdin or self._ffmpeg_process.stdin.closed or self._ffmpeg_process.poll() is not None:
-            raise BrokenPipeError('FFmpeg subprocess stdin is closed')
-        try:
-            self._ffmpeg_process.stdin.write(out_buffer)
-        except OSError as exc:
-            if 'Errno 22' in str(exc):
-                raise BrokenPipeError(str(exc)) from OSError
-            raise
+
+        write_to_async_pipe_sane(self._ffmpeg_process, self._ffmpeg_process.stdin, out_buffer)
 
     async def record_buffer(self, stream_buffer: StreamBuffer) -> None:
         """

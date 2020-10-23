@@ -10,6 +10,7 @@ import time
 import uuid
 import wave
 from abc import ABC, abstractmethod
+from asyncio.subprocess import Process
 from contextlib import closing, contextmanager, asynccontextmanager
 from dataclasses import dataclass, field as dataclass_field
 from functools import partial
@@ -24,8 +25,7 @@ import pyaudio
 from .datatypes import PCMSampleFormat, PCMFormat, AudioDescriptor, AudioFileDescriptor, AudioBytesDescriptor, \
     AudioStreamDescriptor, AudioPCMDescriptor, AudioEncodedDescriptor
 from ..common import BackgroundService, TimestampType, chunked
-from ..logger import custom_log
-
+from ..logger import custom_log, LoggerType
 
 __all__ = [
     'CHUNK_FRAMES',
@@ -36,6 +36,9 @@ __all__ = [
     'StreamBuffer',
     'InputStreamHandler',
     'OutputStreamHandler',
+    'ffmpeg_subprocess',
+    'write_to_async_pipe_sane',
+    'read_from_async_pipe_sane',
     'BusListenerCallback',
     'BusListenerHandle',
     'AudioService'
@@ -272,11 +275,6 @@ class StreamHandler(ABC):
         return self._bus
 
     @property
-    def success(self) -> bool:
-        """True if audio stream is finished and no errors were caught, else False"""
-        return self._done_event.is_set() and self.stream_error is None
-
-    @property
     def done_event(self) -> Event:
         """Stream Event indicating whether the stream is done"""
         return self._done_event
@@ -285,6 +283,14 @@ class StreamHandler(ABC):
     def stop_event(self) -> Event:
         """Stream Event indicating whether to stop the stream"""
         return self._stop_event
+
+    @property
+    def success(self) -> bool:
+        """True if audio stream is finished and no errors were caught, else False"""
+        return self._done_event.is_set() and self.stream_error is None
+
+    def set_error(self, error: BaseException):
+        self.stream_error = error
 
     @property
     def start_time(self) -> TimestampType:
@@ -366,6 +372,92 @@ class OutputStreamHandler(StreamHandler):
             raise RuntimeError('Must provide a "read_callback" function in order to output audio')
         audio_data: bytes = self.read_callback(frame_count)
         return audio_data
+
+
+@asynccontextmanager
+async def ffmpeg_subprocess(ffmpeg_spec: ffmpeg.Stream, stdin: Union[int, IO, None] = None,
+                            stdout: Union[int, IO, None] = None, stderr: Union[int, IO, None] = None,
+                            kill_timeout: Optional[float] = None, logger: Optional[LoggerType] = None,
+                            error_callback: Optional[Callable[[BaseException], ...]] = None) -> Iterator[Process]:
+    """
+    Async context manager utility method to wrap a FFmpeg process
+    :param ffmpeg_spec: a `Stream` object from ffmpeg-python library specifying the runtime options for FFmpeg
+    :param stdin: the stdin arugment for the subprocess call. If omitted, defaults to subprocess.DEVNULL
+    :param stdout: the stdout argument for the subprocess call. If omitted, defaults to subprocess.DEVNULL
+    :param stderr: the stderr argument for the subprocess call. If omitted, defaults to subprocess.DEVNULL
+    :param kill_timeout: the timeout in seconds to wait for the FFmpeg process to end before killing it.
+                         If omitted or None, it waits until the FFmpeg process ends on its own.
+    :param logger: a logger instance for logging messages, optional
+    :param error_callback: a callback to send errors caught during the process termination phase
+    :return: yields the FFmpeg process
+    """
+    if stdin is None:
+        stdin = subprocess.DEVNULL
+    if stdout is None:
+        stdout = subprocess.DEVNULL
+    if stderr is None:
+        stderr = subprocess.DEVNULL
+    ffmpeg_exec: str = 'ffmpeg'
+    ffmpeg_args: List[str] = ffmpeg.get_args(ffmpeg_spec)
+    ffmpeg_process: Process = await asyncio.create_subprocess_exec(ffmpeg_exec, *ffmpeg_args,
+                                                                   stdin=stdin, stdout=stdout, stderr=stderr)
+    try:
+        yield ffmpeg_process
+    finally:
+        try:
+            ffmpeg_retcode: Optional[int] = await asyncio.wait_for(await ffmpeg_process.wait(), kill_timeout)
+        except asyncio.TimeoutError:
+            error_msg: str = f'FFmpeg still running after {kill_timeout}s, killing it'
+            if logger:
+                logger.debug(error_msg)
+            ffmpeg_process.kill()
+            if error_callback:
+                error_callback(RuntimeError(error_msg))
+        else:
+            if ffmpeg_retcode != 0:  # TODO: Retrieve stderr?
+                error_msg: str = f'FFmpeg exited with return code {ffmpeg_retcode}'
+                if logger:
+                    logger.debug(error_msg)
+                if error_callback:
+                    error_callback(RuntimeError(error_msg))
+
+
+def write_to_async_pipe_sane(process: Process, pipe: Optional[asyncio.StreamWriter], data: bytes) -> None:
+    """
+    Write to an async subprocess pipe catching and unifiying errors
+    :param process: the asyncio subprocess `Process`
+    :param pipe: the asyncio subprocess pipe, a `StreamWriter` object
+    :param data: the binary data to write
+    :raise BrokenPipeError: if couldn't write to the pipe
+    """
+    if process.returncode is not None or not pipe or pipe.is_closing():
+        raise BrokenPipeError('Subprocess pipe is closed')
+    try:
+        pipe.write(data)
+    except (OSError, ValueError) as exc:
+        if 'Errno 22' in str(exc) or 'closed pipe' in str(exc):
+            raise BrokenPipeError(str(exc)) from exc
+        raise
+
+
+# noinspection PyUnusedLocal
+async def read_from_async_pipe_sane(process: Process, pipe: Optional[asyncio.StreamReader], n: int) -> bytes:
+    """
+    Read from an async subprocess pipe catching and unifiying errors
+    :param process: the asyncio subprocess `Process`
+    :param pipe: the asyncio subprocess pipe, a `StreamWriter` object
+    :param n: the number of bytes to read
+    :return: the read bytes
+    :raise BrokenPipeError: if couldn't read from the pipe
+    """
+    if not pipe:
+        raise BrokenPipeError('Subprocess pipe is closed')
+    try:
+        return await pipe.read(n)
+    except (OSError, ValueError) as exc:
+        if 'Errno 22' in str(exc) or 'closed pipe' in str(exc):
+            raise BrokenPipeError(str(exc)) from exc
+        raise
 
 
 BusListenerCallback = Callable[[StreamBuffer], Union[Awaitable[None], None]]
@@ -500,7 +592,7 @@ class AudioService(BackgroundService):
         """
         for listener_handle in self._bus_listeners:
             if listener_handle.bus_name == stream_buffer.stream_handler.bus:
-                self._loop.create_task(self._route_asap(listener_handle, stream_buffer))
+                asyncio.run_coroutine_threadsafe(self._route_asap(listener_handle, stream_buffer), self._loop)
 
     @staticmethod
     async def _route_asap(listener_handle: BusListenerHandle, stream_buffer: StreamBuffer) -> None:
@@ -540,7 +632,7 @@ class AudioService(BackgroundService):
                 pass
             except BaseException as exc:
                 self.__log.warning(f'Error in PyAudio stream: {exc}', exc_info=True)
-                stream_handler.stream_error = exc
+                stream_handler.set_error(exc)
                 raise
             finally:
                 stream_handler.done_event.set()
@@ -567,14 +659,14 @@ class AudioService(BackgroundService):
         stream_handler: InputStreamHandler = InputStreamHandler(audio_service=self,
                                                                 write_callback=write_callback,
                                                                 pcm_format=pcm_format)
-        self._loop.create_task(self._pa_acquire(stream_handler=stream_handler))
+        asyncio.run_coroutine_threadsafe(self._pa_acquire(stream_handler=stream_handler), self._loop)
         try:
             yield stream_handler
         except SystemExit:
             pass
         except BaseException as exc:
             self.__log.warning(f'Error in input PyAudio stream: {exc}', exc_info=True)
-            stream_handler.stream_error = exc
+            stream_handler.set_error(exc)
             raise
         finally:
             stream_handler.stop_event.set()
@@ -602,7 +694,7 @@ class AudioService(BackgroundService):
 
     @asynccontextmanager
     async def _ffmpeg_decoder(self, input_args: MutableMapping[str, Any], pcm_format: PCMFormat,
-                              stream_handler: OutputStreamHandler, pipe_stdin: bool) -> Iterator[subprocess.Popen]:
+                              stream_handler: OutputStreamHandler, pipe_stdin: bool) -> Iterator[Process]:
         """
         Async context manager utility method to wrap a FFmpeg-decoded playback stream
         :param input_args: commandline args for FFmpeg for the input audio to be decoded
@@ -612,66 +704,52 @@ class AudioService(BackgroundService):
         :return: yields the FFmpeg subprocess
         """
         ffmpeg_spec: ffmpeg.Stream = ffmpeg.input(**input_args).output('pipe:', **pcm_format.ffmpeg_args)
-        ffmpeg_args: List[str] = ffmpeg.compile(ffmpeg_spec, 'ffmpeg')
-        ffmpeg_process: subprocess.Popen = subprocess.Popen(args=ffmpeg_args, bufsize=0, text=False,
-                                                            stdin=subprocess.PIPE if pipe_stdin else subprocess.DEVNULL,
-                                                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                                            close_fds=True)
+        async with ffmpeg_subprocess(ffmpeg_spec, stdin=subprocess.PIPE if pipe_stdin else subprocess.DEVNULL,
+                                     stdout=subprocess.PIPE, kill_timeout=2.0, logger=self.__log,
+                                     error_callback=stream_handler.set_error) as ffmpeg_process:
 
-        def read_stdout_pipe(frame_count: int) -> bytes:
-            nonlocal ffmpeg_process, pcm_format
-            # Ensuring we don't read less than what requested, until output has finished
-            target_bytes: int = frame_count * pcm_format.width
-            buffer: bytes = b''
-            while (bytes_to_read := target_bytes - len(buffer)) > 0:
-                read_bytes: bytes = ffmpeg_process.stdout.read(bytes_to_read)
-                if not read_bytes:
-                    if not pipe_stdin or ffmpeg_process.stdin.closed:
-                        if ffmpeg_process.stdout and not ffmpeg_process.stdout.closed:
-                            ffmpeg_process.stdout.close()
+            def read_stdout_pipe(frame_count: int) -> bytes:
+                nonlocal ffmpeg_process, pcm_format
+                # Ensuring we don't read less than what requested, until output has finished
+                target_bytes: int = frame_count * pcm_format.width
+                buffer: bytes = b''
+                while (bytes_to_read := target_bytes - len(buffer)) > 0:
+                    read_coro: Awaitable = read_from_async_pipe_sane(ffmpeg_process, ffmpeg_process.stdout, bytes_to_read)
+                    try:
+                        read_bytes: bytes = asyncio.run_coroutine_threadsafe(read_coro, self._loop).result()
+                    except BrokenPipeError:
                         break
-                    time.sleep(0.5 * (bytes_to_read / pcm_format.width) * pcm_format.sample_duration)
-                buffer += read_bytes
-            return buffer
+                    if not read_bytes:
+                        if not pipe_stdin or ffmpeg_process.stdin.is_closing():
+                            # if ffmpeg_process.stdout and not ffmpeg_process.stdout.at_eof():
+                            #     ffmpeg_process.stdout.close()
+                            break
+                        time.sleep(0.5 * (bytes_to_read / pcm_format.width) * pcm_format.sample_duration)
+                    buffer += read_bytes
+                return buffer
 
-        stream_handler.read_callback = read_stdout_pipe
-        stream_handler.pcm_format = pcm_format
-        playback_task: asyncio.Task = self._loop.create_task(self._pa_playback(stream_handler))
+            stream_handler.read_callback = read_stdout_pipe
+            stream_handler.pcm_format = pcm_format
+            playback_task: asyncio.Task = self._loop.create_task(self._pa_playback(stream_handler))
 
-        try:
-            yield ffmpeg_process
-        except SystemExit:
-            pass
-        except BrokenPipeError as exc:
-            self.__log.warning(f'Stopped playback: {exc}')
-        except BaseException as exc:
-            self.__log.warning(f'Got exception in FFmpeg decoder context: {exc}')
-            stream_handler.stream_error = exc
-            raise
-        finally:
-            ffmpeg_retcode: Optional[int]
-            while True:
-                ffmpeg_retcode = ffmpeg_process.poll()
-                if playback_task.done() or ffmpeg_retcode is not None:
-                    stream_handler.stop_event.set()
-                    break
-                await asyncio.sleep(0.1)
-            if ffmpeg_retcode is None:
-                for _ in range(20):
-                    ffmpeg_retcode = ffmpeg_process.poll()
-                    if ffmpeg_retcode is not None:
+            try:
+                yield ffmpeg_process
+            except SystemExit:
+                pass
+            except BrokenPipeError as exc:
+                self.__log.warning(f'Stopped playback: {exc}')
+            except BaseException as exc:
+                self.__log.warning(f'Got exception in FFmpeg decoder context: {exc}')
+                stream_handler.set_error(exc)
+                raise
+            finally:
+                ffmpeg_retcode: Optional[int]
+                while True:
+                    ffmpeg_retcode = ffmpeg_process.returncode
+                    if playback_task.done() or ffmpeg_retcode not in (None, 0):
+                        stream_handler.stop_event.set()
                         break
                     await asyncio.sleep(0.1)
-                else:
-                    error_msg: str = 'FFmpeg still running 2.0s after output stream ended, killing it'
-                    self.__log.debug(error_msg)
-                    ffmpeg_process.kill()
-                    stream_handler.stream_error = RuntimeError(error_msg)
-                    return
-            if ffmpeg_retcode != 0:  # TODO: Retrieve stderr?
-                error_msg: str = f'FFmpeg exited with return code {ffmpeg_retcode}'
-                self.__log.debug(error_msg)
-                stream_handler.stream_error = RuntimeError(error_msg)
 
     async def _play_ffmpeg_piped(self, audio: Union[bytes, IO], stream_handler: OutputStreamHandler,
                                  codec: Optional[str] = None, data_pcm_format: Optional[PCMFormat] = None,
@@ -692,11 +770,13 @@ class AudioService(BackgroundService):
         if data_pcm_format is not None:
             input_args.update(**data_pcm_format.ffmpeg_args)
         async with self._ffmpeg_decoder(input_args, pcm_format, stream_handler, pipe_stdin=True) as ffmpeg_process:
+            assert isinstance(ffmpeg_process, Process)
             chunk_size: int
             if data_pcm_format is not None:
                 chunk_size = ((self.CHUNK_FRAMES * data_pcm_format.rate) // pcm_format.rate) * data_pcm_format.width
             else:
                 chunk_size = self.CHUNK_FRAMES
+            sleep_time: float = chunk_size / pcm_format.width * pcm_format.sample_duration * 0.5
             # Feed audio data to ffmpeg stdin
             is_stream: bool = hasattr(audio, 'read')
             if not is_stream:
@@ -716,15 +796,8 @@ class AudioService(BackgroundService):
                         break
                 if stream_handler.stop_event.is_set():
                     break
-                if not ffmpeg_process.stdin or ffmpeg_process.stdin.closed or ffmpeg_process.poll() is not None:
-                    raise BrokenPipeError('FFmpeg subprocess stdin is closed')
-                try:
-                    ffmpeg_process.stdin.write(input_chunk)
-                except OSError as exc:
-                    if 'Errno 22' in str(exc):
-                        raise BrokenPipeError(str(exc)) from OSError
-                    raise
-                await asyncio.sleep(0)
+                write_to_async_pipe_sane(ffmpeg_process, ffmpeg_process.stdin, input_chunk)
+                await asyncio.sleep(sleep_time)
             ffmpeg_process.stdin.close()
 
     async def _play_ffmpeg_file(self, filepath: str,
@@ -751,7 +824,7 @@ class AudioService(BackgroundService):
         """
         self.ensure_running()
         stream_handler: OutputStreamHandler = OutputStreamHandler(audio_service=self)
-        self._loop.create_task(playback_callable(stream_handler=stream_handler))
+        asyncio.run_coroutine_threadsafe(playback_callable(stream_handler=stream_handler), self._loop)
         if blocking:
             stream_handler.done_event.wait()
         return stream_handler
