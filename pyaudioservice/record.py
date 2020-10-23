@@ -167,6 +167,7 @@ class AudioRecorder:
         """Internal coroutine that cleans up and saves pending time frames"""
         while self._time_frames:
             await self._save_time_frame(self._time_frames.popleft())
+        write_to_async_pipe_sane(self._ffmpeg_process, self._ffmpeg_process.stdin, b'\0')
         self._ffmpeg_process.stdin.close()
 
     async def _save_time_frame(self, time_frame: StreamBuffersTimeFrame) -> None:
