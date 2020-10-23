@@ -2,6 +2,7 @@
 
 import asyncio
 import audioop
+import os
 import subprocess
 import time
 from collections import deque
@@ -88,6 +89,8 @@ class AudioRecorder:
 
     def start(self) -> None:
         """Start the audio recording"""
+        self.__log.info(f'Starting recording for {"+".join(self._source_buses)} '
+                        f'on {os.path.basename(self._out_file_path)}')
         self._audio_service.ensure_running()
         self._audio_service.loop.create_task(self._start_recording())
 
@@ -112,7 +115,8 @@ class AudioRecorder:
                                                    **self._pcm_format.ffmpeg_args_nofmt, **self._encoder_options)
         ffmpeg_args: List[str] = ffmpeg.compile(ffmpeg_spec, 'ffmpeg', overwrite_output=True)
         self._ffmpeg_process: subprocess.Popen = subprocess.Popen(args=ffmpeg_args, bufsize=0, text=False,
-                                                                  stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+                                                                  stdout=subprocess.DEVNULL, stdin=subprocess.PIPE,
+                                                                  stderr=subprocess.DEVNULL, close_fds=True)
         try:
             await self._recording_loop()
         except SystemExit:
