@@ -118,10 +118,14 @@ class AudioRecorder:
                                                                   stdout=subprocess.DEVNULL, stdin=subprocess.PIPE,
                                                                   stderr=subprocess.DEVNULL, close_fds=True)
         try:
-            await self._recording_loop()
-        except SystemExit:
-            pass
-        await self._time_frames_cleanup()
+            try:
+                await self._recording_loop()
+            except SystemExit:
+                pass
+            await self._time_frames_cleanup()
+        except BrokenPipeError as exc:
+            self.__log.warning(f'Stopped recording: {exc}')
+            return
         while True:
             self.__log.debug('Waiting for ffmpeg to stop')
             ffmpeg_retcode: Optional[int] = self._ffmpeg_process.poll()
@@ -198,7 +202,14 @@ class AudioRecorder:
             cum_buffer += buffer_np
         out_buffer: bytes = cum_buffer.tobytes()
         # TODO: Detect if stdin.write fails, in case try to retrieve stderr and print it. Do we need async subprocess?
-        self._ffmpeg_process.stdin.write(out_buffer)
+        if not self._ffmpeg_process.stdin or self._ffmpeg_process.stdin.closed or self._ffmpeg_process.poll() is not None:
+            raise BrokenPipeError('FFmpeg subprocess stdin is closed')
+        try:
+            self._ffmpeg_process.stdin.write(out_buffer)
+        except OSError as exc:
+            if 'Errno 22' in str(exc):
+                raise BrokenPipeError(str(exc)) from OSError
+            raise
 
     async def record_buffer(self, stream_buffer: StreamBuffer) -> None:
         """
@@ -206,7 +217,8 @@ class AudioRecorder:
         :param stream_buffer: the `StreamBuffer`s audio data chunk passed by audio service
         """
         if not self._recording:
-            self.__log.warning('Cannot record audio buffer chunk: recording is not active!')
+            self.__log.debug('Cannot record audio buffer chunk: recording is not active!')
+            return
         for time_frame in reversed(self._time_frames):
             if time_frame.start_time <= stream_buffer.start_time:
                 break

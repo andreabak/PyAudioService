@@ -642,6 +642,8 @@ class AudioService(BackgroundService):
             yield ffmpeg_process
         except SystemExit:
             pass
+        except BrokenPipeError as exc:
+            self.__log.warning(f'Stopped playback: {exc}')
         except BaseException as exc:
             self.__log.warning(f'Got exception in FFmpeg decoder context: {exc}')
             stream_handler.stream_error = exc
@@ -714,7 +716,14 @@ class AudioService(BackgroundService):
                         break
                 if stream_handler.stop_event.is_set():
                     break
-                ffmpeg_process.stdin.write(input_chunk)
+                if not ffmpeg_process.stdin or ffmpeg_process.stdin.closed or ffmpeg_process.poll() is not None:
+                    raise BrokenPipeError('FFmpeg subprocess stdin is closed')
+                try:
+                    ffmpeg_process.stdin.write(input_chunk)
+                except OSError as exc:
+                    if 'Errno 22' in str(exc):
+                        raise BrokenPipeError(str(exc)) from OSError
+                    raise
                 await asyncio.sleep(0)
             ffmpeg_process.stdin.close()
 
