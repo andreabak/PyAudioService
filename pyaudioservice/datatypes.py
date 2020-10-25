@@ -32,6 +32,7 @@ PCMSampleFormatSpec = namedtuple('PCMSampleFormatSpec', 'width, portaudio_value,
 """PCM sample format specifications as used by PCMSampleFormat"""
 
 
+# pylint: disable=no-member
 class PCMSampleFormat(enum.Enum):
     """
     An enum class to represent PCM sample formats.
@@ -78,7 +79,7 @@ class PCMSampleFormat(enum.Enum):
             else:
                 return cls.int8
         elif unsigned:
-            raise ValueError(f'Unsigned PCM sample format is supported only for 8-bit')
+            raise ValueError('Unsigned PCM sample format is supported only for 8-bit')
         elif width == 2:
             return cls.int16
         elif width == 3:

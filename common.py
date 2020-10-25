@@ -2,10 +2,13 @@
 
 from abc import ABC, abstractmethod
 from threading import Event, Thread
-from typing import Sequence
+from typing import TypeVar, Sequence, Iterator
 
 
-def chunked(seq: Sequence, n: int):
+ST = TypeVar('ST')
+
+
+def chunked(seq: Sequence[ST], n: int) -> Iterator[ST]:
     """Yield successive n-sized chunks from seq."""
     for i in range(0, len(seq), n):
         yield seq[i:i + n]
@@ -27,13 +30,13 @@ class BackgroundService(ABC):
         """
         ...
 
-    def start(self):
+    def start(self) -> None:
         """
         Starts the background thread
         """
         self._thread.start()
 
-    def stop(self, wait: bool = True):
+    def stop(self, wait: bool = True) -> None:
         """
         Stops the background thread and waits for it to finish.
         :param wait: If True, waits until the thread is stopped
@@ -42,8 +45,8 @@ class BackgroundService(ABC):
         if wait:
             self._thread.join()
 
-    def __enter__(self):
+    def __enter__(self) -> None:
         self.start()
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.stop()
