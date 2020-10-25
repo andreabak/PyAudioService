@@ -109,7 +109,11 @@ _bare_logger.setLevel(logging.INFO)
 log: CustomLoggerAdapter = CustomLoggerAdapter(_bare_logger)
 
 
-def set_log_level(level: str):
+def set_log_level(level: str) -> None:
+    """
+    Set the log level for the base logger
+    :param level: the level to set for the logger as a string
+    """
     global _bare_logger
     _bare_logger.setLevel(level)
 

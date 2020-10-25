@@ -10,7 +10,7 @@ from collections import deque
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field as dataclass_field
 from threading import Event
-from typing import List, MutableMapping, Any, Optional, Union, Sequence, Iterator
+from typing import List, MutableMapping, Any, Optional, Union, Sequence, Deque, AsyncContextManager, ContextManager
 
 import ffmpeg
 import numpy as np
@@ -36,7 +36,7 @@ class StreamBuffersTimeFrame:
 
 
 @custom_log(component='RECORDING')
-class AudioRecorder:
+class AudioRecorder:  # TODO: Improve logging for class
     """
     Class used for audio recording to a file from one or more audio buses within `AudioService`
     """
@@ -78,7 +78,7 @@ class AudioRecorder:
             encoder_options = self.DEFAULT_ENCODER_OPTIONS
         self._encoder_options: MutableMapping[str, Any] = encoder_options
 
-        self._time_frames: deque[StreamBuffersTimeFrame] = deque()
+        self._time_frames: Deque[StreamBuffersTimeFrame] = deque()
         self._frame_size: int = CHUNK_FRAMES
         self._ffmpeg_process: Optional[Process] = None
         self._recording: bool = False
@@ -101,7 +101,7 @@ class AudioRecorder:
         self._stop_event.set()
 
     @contextmanager
-    def record(self) -> Iterator[None]:
+    def record(self) -> ContextManager:
         """Context manager utility method to start and stop recording within a with-block"""
         self.start()
         try:
@@ -115,7 +115,7 @@ class AudioRecorder:
                                            .filter('alimiter', attack=10, release=20) \
                                            .output(self._out_file_path,
                                                    **self._pcm_format.ffmpeg_args_nofmt, **self._encoder_options)
-        ffmpeg_context = ffmpeg_subprocess(ffmpeg_spec, stdin=subprocess.PIPE, kill_timeout=5.0, logger=self.__log)
+        ffmpeg_context: AsyncContextManager[Process] = ffmpeg_subprocess(ffmpeg_spec, stdin=subprocess.PIPE, kill_timeout=5.0, logger=self.__log)
         async with ffmpeg_context as ffmpeg_process:
             self._ffmpeg_process = ffmpeg_process
             try:
@@ -175,7 +175,6 @@ class AudioRecorder:
         Internal coroutine that handles buffers merging and saving piping to FFmpeg for the given time frame
         :param time_frame: the `StreamBuffersTimeFrame` time frame object to save
         """
-        # TODO: Try bake calculations beforehand somewhere, without making code unreadable
         internal_fmt_channels: int = self.INTERNAL_FORMAT.channels
         internal_fmt_numpy: np.number = self.INTERNAL_FORMAT.sample_fmt.numpy
         # Okay...
@@ -208,6 +207,9 @@ class AudioRecorder:
         if not self._recording:
             self.__log.debug('Cannot record audio buffer chunk: recording is not active!')
             return
+        if not self._time_frames:
+            self.__log.warning('Received a buffer for recording but no time frames exist')
+            return
         for time_frame in reversed(self._time_frames):
             if time_frame.start_time <= stream_buffer.start_time:
                 break
@@ -215,4 +217,4 @@ class AudioRecorder:
             self.__log.warning('Couldn\'t find appropriate time frame for stream buffer.'
                                'Buffer too old or discarded time frame')
             return
-        time_frame.buffers.append(stream_buffer)
+        time_frame.buffers.append(stream_buffer)  # pylint: disable=undefined-loop-variable

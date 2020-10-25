@@ -17,7 +17,7 @@ from functools import partial
 from inspect import iscoroutinefunction
 from threading import Event, Thread
 from typing import Callable, TypedDict, Optional, Tuple, List, MutableMapping, Any, Union, Awaitable, Protocol, \
-    IO, Iterator
+    IO, Iterator, AsyncContextManager, ContextManager
 
 import ffmpeg
 import pyaudio
@@ -36,6 +36,9 @@ __all__ = [
     'StreamBuffer',
     'InputStreamHandler',
     'OutputStreamHandler',
+    'AudioDeviceIndexType',
+    'AudioDeviceInfo',
+    'AudioDevicesInfoType',
     'ffmpeg_subprocess',
     'write_to_async_pipe_sane',
     'read_from_async_pipe_sane',
@@ -204,7 +207,7 @@ class StreamHandler(ABC):
         self._done_event.clear()
         self._stop_event: Event = Event()
         self._stop_event.clear()
-        self.stream_error: Optional[BaseException] = None
+        self.stream_error: Optional[Exception] = None
         self._start_time: Optional[TimestampType] = None
         self._done_frames: int = 0
 
@@ -247,7 +250,7 @@ class StreamHandler(ABC):
         try:
             audio_data: bytes = self._retrieve_audio_data(in_data=in_data, frame_count=frame_count,
                                                           time_info=time_info, status=status)
-        except BaseException as exc:
+        except Exception as exc:  # pylint: disable=broad-except
             self._audio_service.logger.error(f'Error in {self.__class__.__name__}: {exc}', exc_info=True)
             return None, pyaudio.paAbort
         if not audio_data:
@@ -289,7 +292,8 @@ class StreamHandler(ABC):
         """True if audio stream is finished and no errors were caught, else False"""
         return self._done_event.is_set() and self.stream_error is None
 
-    def set_error(self, error: BaseException):
+    def set_error(self, error: Exception) -> None:
+        """Store an error related to the stream handler instance"""
         self.stream_error = error
 
     @property
@@ -378,7 +382,8 @@ class OutputStreamHandler(StreamHandler):
 async def ffmpeg_subprocess(ffmpeg_spec: ffmpeg.Stream, stdin: Union[int, IO, None] = None,
                             stdout: Union[int, IO, None] = None, stderr: Union[int, IO, None] = None,
                             kill_timeout: Optional[float] = None, logger: Optional[LoggerType] = None,
-                            error_callback: Optional[Callable[[BaseException], ...]] = None) -> Iterator[Process]:
+                            error_callback: Optional[Callable[[Exception], ...]] = None) \
+        -> AsyncContextManager[Process]:
     """
     Async context manager utility method to wrap a FFmpeg process
     :param ffmpeg_spec: a `Stream` object from ffmpeg-python library specifying the runtime options for FFmpeg
@@ -402,14 +407,14 @@ async def ffmpeg_subprocess(ffmpeg_spec: ffmpeg.Stream, stdin: Union[int, IO, No
     ffmpeg_process: Process = await asyncio.create_subprocess_exec(ffmpeg_exec, *ffmpeg_args,
                                                                    stdin=stdin, stdout=stdout, stderr=stderr,
                                                                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
-    caught_exception: Optional[BaseException] = None
+    caught_exception: Optional[Exception] = None
     try:
         yield ffmpeg_process
     except BrokenPipeError as exc:
         if logger:
             logger.warning(f'FFmpeg pipes broken: {exc}')
         caught_exception = exc
-    except BaseException as exc:
+    except Exception as exc:
         if logger:
             logger.debug(f'Got exception within FFmpeg context: {exc}')
         caught_exception = exc
@@ -435,26 +440,27 @@ async def ffmpeg_subprocess(ffmpeg_spec: ffmpeg.Stream, stdin: Union[int, IO, No
                     error_callback(RuntimeError(error_msg))
         finally:
             # noinspection PyProtectedMember,PyUnresolvedReferences
-            if caught_exception is not None or asyncio.get_running_loop()._stopping:
+            if caught_exception is not None or asyncio.get_running_loop()._stopping:  # pylint: disable=protected-access
                 if logger:
                     logger.debug('Force closing subprocess transports')
 
                 # noinspection PyProtectedMember,PyUnresolvedReferences,PyBroadException
-                def close_transport(transported_object: object):
+                # pylint: disable=protected-access, broad-except
+                def close_transport(transported_object: object) -> None:
                     try:
                         transport = transported_object._transport
-                    except:
+                    except Exception:
                         pass
                     else:
                         try:
                             transport._call_connection_lost(None)
-                        except:
+                        except Exception:
                             try:
                                 transport._force_close()
-                            except:
+                            except Exception:
                                 try:
                                     transport.close()
-                                except:
+                                except Exception:
                                     pass
                 close_transport(ffmpeg_process.stdin)
                 close_transport(ffmpeg_process.stdout)
@@ -481,6 +487,7 @@ def write_to_async_pipe_sane(process: Process, pipe: Optional[asyncio.StreamWrit
 
 
 # noinspection PyUnusedLocal
+# pylint: disable=unused-argument
 async def read_from_async_pipe_sane(process: Process, pipe: Optional[asyncio.StreamReader], n: int) -> bytes:
     """
     Read from an async subprocess pipe catching and unifiying errors
@@ -500,9 +507,33 @@ async def read_from_async_pipe_sane(process: Process, pipe: Optional[asyncio.Str
         raise
 
 
+AudioDeviceIndexType = int
+
+
+class AudioDeviceInfo(TypedDict):
+    """
+    TypedDict representing audio device information as returned by PortAudio
+    """
+    index: AudioDeviceIndexType
+    structVersion: int
+    name: str
+    hostApi: int
+    maxInputChannels: int
+    maxOutputChannels: int
+    defaultLowInputLatency: float
+    defaultLowOutputLatency: float
+    defaultHighInputLatency: float
+    defaultHighOutputLatency: float
+    defaultSampleRate: Union[int, float]
+
+
+AudioDevicesInfoType = MutableMapping[AudioDeviceIndexType, AudioDeviceInfo]
+
+
 BusListenerCallback = Callable[[StreamBuffer], Union[Awaitable[None], None]]
 
 
+# pylint: disable=undefined-variable
 @dataclass(frozen=True)
 class BusListenerHandle:
     """
@@ -524,7 +555,7 @@ class PlaybackCallable(Protocol):
 
 
 @custom_log(component='AUDIO')
-class AudioService(BackgroundService):
+class AudioService(BackgroundService):  # TODO: Improve logging for class
     """
     Class for the main audio service.
     Provides an unified interface to the audio backend and related audio functionality.
@@ -539,6 +570,63 @@ class AudioService(BackgroundService):
     BUS_INPUT: str = 'input'
     """Default name for the input audio bus"""
 
+    @classmethod
+    @contextmanager
+    def pyaudio_context(cls) -> ContextManager[pyaudio.PyAudio]:
+        """
+        Context manager class method that creates a `PyAudio` instance and manages termination
+        :return: the `PyAudio` instance
+        """
+        pa_instance: pyaudio.PyAudio = pyaudio.PyAudio()
+        try:
+            yield pa_instance
+        finally:
+            pa_instance.terminate()
+
+    @classmethod
+    def get_audio_devices_info(cls) -> AudioDevicesInfoType:
+        """
+        Get audio devices info
+        :return: A dictionary of `AudioDeviceInfo`, with device index as keys
+        """
+        with cls.pyaudio_context() as pa:
+            devices_info: AudioDevicesInfoType = {i: pa.get_device_info_by_index(i)
+                                                  for i in range(pa.get_device_count())}
+        return devices_info
+
+    @classmethod
+    def get_audio_device_by_name(cls, device_name: str) -> Tuple[AudioDeviceIndexType, AudioDeviceInfo]:
+        """
+        Get an audio device by name
+        :param device_name: The exact device name to be matched against the known available audio devices
+        :return: A tuple of audio device index and `AudioDeviceInfo`
+        :raise KeyError: If the no audio device is found by the given name
+        """
+        for device_index, device_info in cls.get_audio_devices_info().items():
+            if device_info['name'] == device_name:
+                return device_index, device_info
+        raise KeyError(f'Audio device with name "{device_name}" not found')
+
+    @classmethod
+    def print_audio_devices(cls) -> None:
+        """
+        Print a list of input audio devices
+        """
+        for device_index, device_info in cls.get_audio_devices_info().items():
+            input_chn: int = device_info['maxInputChannels']
+            output_chn: int = device_info['maxOutputChannels']
+            dev_type: str = 'DUNNO?'
+            if input_chn and output_chn:
+                dev_type = 'IN+OUT'
+            elif input_chn:
+                dev_type = 'INPUT '
+            elif output_chn:
+                dev_type = 'OUTPUT'
+            name: str = device_info['name']
+            rate: str = str(device_info['defaultSampleRate'])
+            # width = dev.get('')
+            print(f"Index {device_index:2} [{dev_type}]: {name} (Max Channels {input_chn}, Default @ {int(rate)} Hz)")
+
     def __init__(self, input_device_index: Optional[int] = None, output_device_index: Optional[int] = None):
         """
         Constructor for `AudioService`
@@ -551,7 +639,7 @@ class AudioService(BackgroundService):
         super().__init__()
         self.input_device_index: Optional[int] = input_device_index
         self.output_device_index: Optional[int] = output_device_index
-        self._pa: pyaudio.PyAudio = pyaudio.PyAudio()
+        self._pa: Optional[pyaudio.PyAudio] = None
         self._bus_listeners: List[BusListenerHandle] = []
 
     @property
@@ -561,6 +649,18 @@ class AudioService(BackgroundService):
 
     def _create_thread(self) -> Thread:
         return Thread(name='AudioThread', target=self._audio_thread_main)
+
+    @contextmanager
+    def _own_pyaudio_context(self) -> ContextManager:
+        """
+        Context manager method that manages the internal `PyAudio` instance creation and termination
+        """
+        with self.pyaudio_context() as pa_instance:
+            self._pa = pa_instance
+            try:
+                yield
+            finally:
+                self._pa = None
 
     def _audio_thread_main(self) -> None:
         """Main entry point function for the audio thread"""
@@ -573,11 +673,12 @@ class AudioService(BackgroundService):
 
     async def _audio_main_async(self) -> None:
         """Main entry point coroutine for the audio service (async)"""
-        while True:
-            if self._stop_event.is_set():
-                self._loop.stop()
-                raise SystemExit
-            await asyncio.sleep(0.1)
+        with self._own_pyaudio_context():
+            while True:
+                if self._stop_event.is_set():
+                    self._loop.stop()
+                    raise SystemExit
+                await asyncio.sleep(0.1)
 
     @property
     def running(self) -> bool:
@@ -619,7 +720,7 @@ class AudioService(BackgroundService):
             self.__log.warning(f'Attempted to remove unregistered bus listener: {repr(listener_handle)}')
 
     @contextmanager
-    def bus_listener(self, bus_name: str, callback: BusListenerCallback) -> Iterator[None]:
+    def bus_listener(self, bus_name: str, callback: BusListenerCallback) -> ContextManager:
         """
         Context manager utility method to register and unregister a bus listener within a with-block
         :param bus_name: the audio bus name on which to register the listener
@@ -652,7 +753,7 @@ class AudioService(BackgroundService):
         else:
             listener_handle.callback(stream_buffer)
 
-    async def _pa_stream(self, stream_handler: StreamHandler, direction: StreamDirection):
+    async def _pa_stream(self, stream_handler: StreamHandler, direction: StreamDirection) -> None:
         """
         Handle a PortAudio stream
         :param stream_handler: the `StreamHandler` object to associate to the stream
@@ -676,7 +777,7 @@ class AudioService(BackgroundService):
                     stream.stop_stream()
             except SystemExit:
                 pass
-            except BaseException as exc:
+            except Exception as exc:
                 self.__log.warning(f'Error in PyAudio stream: {exc}', exc_info=True)
                 stream_handler.set_error(exc)
                 raise
@@ -693,7 +794,7 @@ class AudioService(BackgroundService):
 
     @contextmanager
     def audio_input(self, write_callback: Optional[BufferWriteCallback] = None,
-                    pcm_format: Optional[PCMFormat] = None) -> Iterator[InputStreamHandler]:
+                    pcm_format: Optional[PCMFormat] = None) -> ContextManager[InputStreamHandler]:
         """
         Context manager utility method to start and stop an audio input stream
         :param write_callback: an optional callable that is called with a new chunk of audio data when available
@@ -710,7 +811,7 @@ class AudioService(BackgroundService):
             yield stream_handler
         except SystemExit:
             pass
-        except BaseException as exc:
+        except Exception as exc:
             self.__log.warning(f'Error in input PyAudio stream: {exc}', exc_info=True)
             stream_handler.set_error(exc)
             raise
@@ -740,7 +841,7 @@ class AudioService(BackgroundService):
 
     @asynccontextmanager
     async def _ffmpeg_decoder(self, input_args: MutableMapping[str, Any], pcm_format: PCMFormat,
-                              stream_handler: OutputStreamHandler, pipe_stdin: bool) -> Iterator[Process]:
+                              stream_handler: OutputStreamHandler, pipe_stdin: bool) -> AsyncContextManager[Process]:
         """
         Async context manager utility method to wrap a FFmpeg-decoded playback stream
         :param input_args: commandline args for FFmpeg for the input audio to be decoded
@@ -921,7 +1022,7 @@ class AudioService(BackgroundService):
                 elif isinstance(audio_descriptor, AudioStreamDescriptor):
                     audio = audio_descriptor.audio_stream
                 else:
-                    raise SyntaxError(f'wrong class, sanity check failed')
+                    raise SyntaxError('wrong class, sanity check failed')
                 if isinstance(audio_descriptor, AudioPCMDescriptor):
                     return self.play_data(audio,
                                           data_pcm_format=audio_descriptor.pcm_format,
@@ -931,8 +1032,8 @@ class AudioService(BackgroundService):
                                           codec=audio_descriptor.codec,
                                           blocking=blocking)
                 else:
-                    raise ValueError(f'unknown or unhandled audio descriptor type')
+                    raise ValueError('unknown or unhandled audio descriptor type')
             else:
-                raise ValueError(f'unknown or unhandled audio descriptor type')
+                raise ValueError('unknown or unhandled audio descriptor type')
         except ValueError as exc:
             raise ValueError(f'Could not play audio descriptor {repr(audio_descriptor)}: {exc}') from exc
