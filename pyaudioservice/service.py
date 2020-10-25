@@ -416,6 +416,41 @@ async def read_from_async_pipe_sane(process: Process, pipe: Optional[asyncio.Str
         raise
 
 
+# noinspection PyProtectedMember,PyUnresolvedReferences,PyBroadException
+# pylint: disable=protected-access, broad-except
+def close_protocol_with_transport(protocol: Any, force: bool = False) -> None:
+    """
+    Try closing an asyncio protocol (pipe, subprocess, etc.) if possible.
+    :param protocol: the asyncio protocol to close, can be None
+    :param force: whether to try calling known force close methods on the transport
+    """
+    if protocol is None:
+        return
+    if hasattr(protocol, 'close'):
+        protocol.close()
+    transport: Optional[asyncio.BaseTransport] = getattr(protocol, 'transport', None)
+    if transport is None:
+        transport = getattr(protocol, '_transport', None)
+    if transport is None:
+        return
+    if force:
+        try:
+            transport._call_connection_lost(None)
+        except Exception:
+            try:
+                transport._force_close()
+            except Exception:
+                pass
+        # if (sock := getattr(transport, '_sock', None)) is not None:
+        #     sock.close()
+        #     setattr(transport, '_sock', None)
+    else:
+        try:
+            transport.close()
+        except Exception:
+            pass
+
+
 AudioDeviceIndexType = int
 
 
@@ -791,63 +826,46 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
                                                                        stdin=stdin, stdout=stdout, stderr=stderr,
                                                                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
         caught_exception: Optional[Exception] = None
+        error_msg: str
         try:
             yield ffmpeg_process
-        except BrokenPipeError as exc:
-            if logger:
-                logger.warning(f'FFmpeg pipes broken: {exc}')
-            caught_exception = exc
         except Exception as exc:
+            is_broken_pipe: bool = isinstance(exc, BrokenPipeError)
+            if is_broken_pipe:
+                error_msg = f'FFmpeg pipes broken: {exc}'
+            else:
+                error_msg = f'Got exception within FFmpeg context: {exc}'
             if logger:
-                logger.debug(f'Got exception within FFmpeg context: {exc}')
+                logger.debug(error_msg)
             caught_exception = exc
-            raise
+            if not is_broken_pipe:
+                raise
         finally:
             if logger:
                 logger.debug('FFmpeg terminating')
+            ffmpeg_retcode: Optional[int] = None
+            did_timeout: bool = False
             try:
-                ffmpeg_retcode: Optional[int] = await asyncio.wait_for(ffmpeg_process.wait(), kill_timeout)
+                ffmpeg_retcode = await asyncio.wait_for(ffmpeg_process.wait(), kill_timeout)
             except asyncio.TimeoutError:
-                error_msg: str = f'FFmpeg still running after {kill_timeout}s, killing it'
+                did_timeout = True
+            if did_timeout or ffmpeg_retcode != 0:  # TODO: Retrieve stderr?
+                if did_timeout:
+                    error_msg = f'FFmpeg still running after {kill_timeout}s, killing it'
+                else:
+                    error_msg = f'FFmpeg exited with return code {ffmpeg_retcode}'
                 if logger:
                     logger.debug(error_msg)
-                ffmpeg_process.kill()
+                if did_timeout:
+                    ffmpeg_process.kill()
                 if error_callback:
                     error_callback(RuntimeError(error_msg))
-            else:
-                if ffmpeg_retcode != 0:  # TODO: Retrieve stderr?
-                    error_msg: str = f'FFmpeg exited with return code {ffmpeg_retcode}'
-                    if logger:
-                        logger.debug(error_msg)
-                    if error_callback:
-                        error_callback(RuntimeError(error_msg))
-            finally:
-                if caught_exception is not None or self.check_exiting(dont_raise=True):
-                    if logger:
-                        logger.debug('Force closing subprocess transports')
-
-                    # noinspection PyProtectedMember,PyUnresolvedReferences,PyBroadException
-                    # pylint: disable=protected-access, broad-except
-                    def close_transport(transported_object: object) -> None:
-                        try:
-                            transport = transported_object._transport
-                        except Exception:
-                            pass
-                        else:
-                            try:
-                                transport._call_connection_lost(None)
-                            except Exception:
-                                try:
-                                    transport._force_close()
-                                except Exception:
-                                    try:
-                                        transport.close()
-                                    except Exception:
-                                        pass
-                    close_transport(ffmpeg_process.stdin)
-                    close_transport(ffmpeg_process.stdout)
-                    close_transport(ffmpeg_process.stderr)
-                    close_transport(ffmpeg_process)
+            if caught_exception is not None or self.check_exiting(dont_raise=True):
+                if logger:
+                    logger.debug('Force closing subprocess transports')
+                close_protocol_with_transport(ffmpeg_process.stdin, force=True)
+                close_protocol_with_transport(ffmpeg_process.stdout, force=True)
+                close_protocol_with_transport(ffmpeg_process.stderr, force=True)
 
     @asynccontextmanager
     async def _ffmpeg_decoder(self, input_args: MutableMapping[str, Any], pcm_format: PCMFormat,
@@ -906,9 +924,7 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
                         stream_handler.stop_event.set()
                         break
                     await asyncio.sleep(0.1)
-                if (transport := getattr(ffmpeg_process.stdout, '_transport', None)) is not None:
-                    if hasattr(transport, 'close'):
-                        transport.close()
+                close_protocol_with_transport(ffmpeg_process.stdout)
 
     async def _play_ffmpeg_piped(self, audio: Union[bytes, IO], stream_handler: OutputStreamHandler,
                                  codec: Optional[str] = None, data_pcm_format: Optional[PCMFormat] = None,
