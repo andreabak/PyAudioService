@@ -1,0 +1,2 @@
+### Bandit config file
+skips: ['B311', 'B404', 'B603', 'B322']

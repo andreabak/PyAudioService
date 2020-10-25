@@ -109,11 +109,11 @@ class FormatConverter:
                                                           self.source_format.rate, self.dest_format.rate,
                                                           self._ratecv_state)
         if self.source_format.channels != self.dest_format.channels:
+            if any(ch_num not in (1, 2) for ch_num in (self.source_format.channels, self.dest_format.channels)):
+                raise ValueError('Only stereo-to-mono or mono-to-stereo channel conversions are supported')
             if self.source_format.channels == 2:
-                assert self.dest_format.channels == 1
                 fragment = audioop.tomono(fragment, self.dest_format.sample_fmt.width, 1.0, 1.0)
             elif self.source_format.channels == 1:
-                assert self.dest_format.channels == 2
                 fragment = audioop.tostereo(fragment, self.dest_format.sample_fmt.width, 1.0, 1.0)
         if self.dest_format.sample_fmt == PCMSampleFormat.uint8:
             fragment = audioop.bias(fragment, 1, 128)
@@ -441,7 +441,7 @@ def close_protocol_with_transport(protocol: Any, force: bool = False) -> None:
         except Exception:
             try:
                 transport._force_close()
-            except Exception:
+            except Exception:  # nosec
                 pass
         # if (sock := getattr(transport, '_sock', None)) is not None:
         #     sock.close()
@@ -449,7 +449,7 @@ def close_protocol_with_transport(protocol: Any, force: bool = False) -> None:
     else:
         try:
             transport.close()
-        except Exception:
+        except Exception:  # nosec
             pass
 
 
@@ -947,7 +947,6 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
         if data_pcm_format is not None:
             input_args.update(**data_pcm_format.ffmpeg_args)
         async with self._ffmpeg_decoder(input_args, pcm_format, stream_handler, pipe_stdin=True) as ffmpeg_process:
-            assert isinstance(ffmpeg_process, Process)
             chunk_size: int
             if data_pcm_format is not None:
                 chunk_size = ((self.CHUNK_FRAMES * data_pcm_format.rate) // pcm_format.rate) * data_pcm_format.width
@@ -955,11 +954,12 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
                 chunk_size = self.CHUNK_FRAMES
             sleep_time: float = chunk_size / pcm_format.width * pcm_format.sample_duration * 0.5
             # Feed audio data to ffmpeg stdin
-            is_stream: bool = hasattr(audio, 'read')
-            if not is_stream:
-                assert isinstance(audio, bytes)
-                chunks_generator: Iterator[bytes] = chunked(audio, chunk_size)
             try:
+                is_stream: bool = hasattr(audio, 'read')
+                if not is_stream:
+                    if not isinstance(audio, bytes):
+                        raise ValueError(f'Only binary IO streams or bytes data are supported, got: {repr(audio)}')
+                    chunks_generator: Iterator[bytes] = chunked(audio, chunk_size)
                 while True:
                     input_chunk: bytes
                     if is_stream:
