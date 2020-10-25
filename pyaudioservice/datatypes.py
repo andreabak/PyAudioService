@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import enum
+import time
 from abc import ABC
 from collections import namedtuple
 from dataclasses import dataclass
-from typing import TypedDict, MutableMapping, Any, IO, Optional
+from io import BytesIO
+from threading import Lock
+from typing import TypedDict, MutableMapping, Any, IO, Optional, Iterator
 
 import numpy as np
 import pyaudio
@@ -25,6 +28,7 @@ __all__ = [
     'AudioEncodedBytesDescriptor',
     'AudioPCMStreamDescriptor',
     'AudioEncodedStreamDescriptor',
+    'BufferedAudioData',
 ]
 
 
@@ -209,3 +213,173 @@ class AudioPCMStreamDescriptor(AudioPCMDescriptor, AudioStreamDescriptor):
 @dataclass
 class AudioEncodedStreamDescriptor(AudioEncodedDescriptor, AudioStreamDescriptor):
     """Audio descriptor used for playback from encoded binary stream"""
+
+
+class BufferedAudioData:
+    """
+    A class for buffered audio data that can be concurrently written and read.
+
+    Provides a `write()` and `read()` method with separated position pointers to
+    allow for a buffer-like producer-consumer pattern.
+
+    Source raw audio bytes data can be added to the buffer by the producer
+    function using `write()`, that accepts either bytes or another AudioData
+    instance, with matching sample_rate and sample_width.
+
+    Then the consumer function can use the `read()` method to get the written
+    data out of the buffer.
+
+    When the producer is done writing data, it should call the `done()`
+    function to signal the data is complete.
+    The property `.complete` will be true if the data is considered complete.
+    Once data is considered "complete", trying to use the `write()` method
+    will raise a `BufferError`, while trying to `read()` beyond the buffer
+    size will raise an `EOFError`, instead of just returning empty data.
+
+    N.B. In the end the buffer will contain the whole written data,
+         backed up by memory, until garbage-collected.
+    """
+    def __init__(self, pcm_format: PCMFormat, frame_data: bytes = None, complete: bool = False):
+        """
+        Initialization for `BufferedAudioData`
+        :param pcm_format: The PCM raw audio format, specified by an instance of `PCMFormat`
+        :param frame_data: Optional initial frame data in bytes, that will be put in the buffer
+        :param complete: Optional bool that if True signals that the provided data is considered complete
+        """
+        self.pcm_format: PCMFormat = pcm_format
+        self._data_buffer: BytesIO = BytesIO()
+        self._buffer_lock: Lock = Lock()
+        self._read_pos: int = 0
+        self._complete: bool
+        if frame_data is not None:
+            self._complete = False
+            self.write(frame_data)
+        self._complete = complete
+
+    @property
+    def complete(self) -> bool:
+        """
+        A read only property indicating whether the audio data contained
+        in the buffer is considered complete or not.
+        :return: True if complete else False
+        """
+        return self._complete
+
+    def done(self) -> None:
+        """
+        Set the internal flag to signal that the audio data in the buffer
+        is complete and no more data is going to be written to it.
+        """
+        self._complete = True
+
+    def _ensure_sample_width(self, data_size: int, nonraising: bool = False) -> Optional[bool]:
+        """
+        Ensures the specified data size is a multiple of the PCM format width
+        :param data_size: The specified data size
+        :param nonraising: Instead of raising an error, return a boolean
+        :return: a boolean indicated whether the data size is a multiple of the PCM format width
+        :raise IOError: If the data size is not a multiple of the PCM format width
+        """
+        is_multiple: bool = (data_size % self.pcm_format.width) == 0
+        if not nonraising and not is_multiple:
+            raise IOError('Data size must be a multiple of "sample_width"')
+        return is_multiple
+
+    def write(self, data: bytes) -> None:
+        """
+        Write raw audio data bytes to the buffer.
+        :param data: The raw audio data bytes
+        :raise BufferError: If the data is already considered complete
+        """
+        if self.complete:
+            raise BufferError('Buffer data is complete!')
+        self._ensure_sample_width(len(data))
+        with self._buffer_lock:
+            self._data_buffer.write(data)
+            self._data_buffer.flush()
+
+    def read(self, size: int = -1) -> bytes:
+        """
+        Read audio data from the buffer.
+        Internally keeps track of the buffer's last read position.
+        :param size: The amount of bytes to read. If omitted, all data will be
+                     read until the end of the buffer.
+        :raise EOFError: If there's no more data to read from the buffer and
+                         the data is considered to be complete.
+        :return: A bytes string of raw audio data. If no new data is present
+                 in the buffer since the last `read()` the returned bytes
+                 string will be empty (== b'').
+        """
+        if size != -1:
+            self._ensure_sample_width(size)
+        data: bytes
+        if self.is_data_available():  # Raises EOFError if no data and self.complete
+            with self._buffer_lock:  # Acquire lock while we're seeking cursor around and reading
+                write_pos = self._data_buffer.tell()  # Back up the current buffer (write) position
+                self._data_buffer.seek(self._read_pos)  # Seek to the last known read position
+                data = self._data_buffer.read(size)  # Read data
+                self._read_pos = self._data_buffer.tell()  # Save the read position
+                self._data_buffer.seek(write_pos)  # Restore the previous buffer (write) position
+            # If we're enforcing only writing and reading in `sample_width` chunks, our returned
+            # audio data bytes length must be a multiple of that.
+            assert self._ensure_sample_width(len(data), nonraising=True), \
+                'Data length is not a multiple of sample_width'
+        else:
+            data = b''  # Signals there's no new data in the buffer, but more might come in the future
+        return data
+
+    def is_data_available(self) -> bool:
+        """
+        Check if any data is available for reading.
+        :return: True if data can be read, else False
+        :raise EOFError: If there's no more data to read from the buffer and
+                         the data is considered to be complete.
+        """
+        with self._buffer_lock:
+            unread_data: bool = self._data_buffer.tell() > self._read_pos
+        if not unread_data and self.complete:
+            raise EOFError('All data from the buffer has been read and data is complete')
+        return unread_data
+
+    def __len__(self) -> int:
+        """
+        Get the size of the buffer in bytes
+        :return: Integer buffer size in bytes
+        """
+        with self._buffer_lock:
+            return self._data_buffer.tell()
+
+    @property
+    def seconds(self) -> float:
+        """
+        Get the length in seconds of the audio data stored in the buffer.
+        This is calculated dividing the total buffer size in bytes
+        by `sample_width` and `sample_rate`.
+        :return: The length in seconds, in float
+        """
+        return len(self) / self.pcm_format.width / self.pcm_format.rate
+
+    def get_whole(self) -> bytes:
+        """
+        Get the whole buffer contents
+        :return: All the bytes in the buffer
+        """
+        return self._data_buffer.getvalue()
+
+    def generate(self) -> Iterator[bytes]:
+        """
+        Generator method that waits for data to be available in the buffer
+        and yields it for chunked usage/transmission.
+
+        N.B. Uses a short blocking sleep time when no audio data is available.
+        :return: An iterator of bytes containing the raw audio data
+        """
+        while True:
+            try:
+                has_data: bool = self.is_data_available()
+            except EOFError:  # Audio data stream is complete
+                break
+            if has_data:
+                yield self.read()  # Yield bytes to request to be sent
+            else:
+                time.sleep(0.05)  # Short sleep, supposing we're doing this in a different thread
