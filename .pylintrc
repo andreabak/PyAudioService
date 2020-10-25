@@ -68,6 +68,7 @@ disable=line-too-long,
         global-statement,
         relative-beyond-top-level,
         no-else-return,
+        cyclic-import,
         print-statement,
         parameter-unpacking,
         unpacking-in-except,
@@ -182,8 +183,23 @@ score=yes
 
 [REFACTORING]
 
+# Maximum number of arguments for function / method.
+max-args=10
+
+# Maximum number of locals for function / method body.
+max-locals=20
+
+# Maximum number of branch for function / method body.
+max-branches=20
+
+# Maximum number of attributes for a class (see R0902).
+max-attributes=20
+
 # Maximum number of nested blocks for function / method body
 max-nested-blocks=5
+
+# Maximum number of statements in function / method body.
+max-statements=75
 
 # Complete name of functions that never returns. When checking for
 # inconsistent-return-statements if a never returning function is called then
@@ -329,7 +345,7 @@ indent-after-paren=4
 indent-string='    '
 
 # Maximum number of characters on a single line.
-max-line-length=100
+max-line-length=120
 
 # Maximum number of lines in a module.
 max-module-lines=1000
@@ -347,7 +363,7 @@ single-line-if-stmt=no
 
 # The type of string formatting that logging methods do. `old` means using %
 # formatting, `new` is for `{}` formatting.
-logging-format-style=old
+logging-format-style=new
 
 # Logging modules to check that the string format arguments are in logging
 # function parameter format.
@@ -387,13 +403,13 @@ max-spelling-suggestions=4
 
 # Spelling dictionary name. Available dictionaries: none. To make it work,
 # install the python-enchant package.
-spelling-dict=
+spelling-dict=en_US
 
 # List of comma separated words that should not be checked.
 spelling-ignore-words=
 
 # A path to a file that contains the private dictionary; one word per line.
-spelling-private-dict-file=
+spelling-private-dict-file=.spelling
 
 # Tells whether to store unknown words to the private dictionary (see the
 # --spelling-private-dict-file option) instead of raising a message.

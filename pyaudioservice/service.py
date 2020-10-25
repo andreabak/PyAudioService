@@ -90,7 +90,7 @@ class FormatConverter:
             raise ValueError('Only integer stereo or mono PCM samples are supported')
         self.source_format: PCMFormat = source_format
         self.dest_format: PCMFormat = dest_format
-        self._ratecv_state = None  # Unknown type
+        self._ratecv_state: Any = None  # Unknown type
 
     def convert(self, fragment: bytes) -> bytes:
         """
@@ -168,7 +168,7 @@ class StreamBuffer:
 
     @property
     def start_time(self) -> float:
-        """Absoulte start time of the audio chunk (usually from a monotonic clock)"""
+        """Absolute start time of the audio chunk (usually from a monotonic clock)"""
         return self.stream_handler.start_time + self.start_time_relative
 
     @property
@@ -196,7 +196,7 @@ class StreamHandler(ABC):
         :param audio_service: a running `AudioService` instance
         :param bus: the audio bus name correlated with this stream
         :param pcm_format: the `PCMFormat` for the stream.
-                           If not specified here, it must be provided before starting the acutual audio stream.
+                           If not specified here, it must be provided before starting the actual audio stream.
         """
         self._audio_service: AudioService = audio_service
         self._bus: str = bus
@@ -260,7 +260,7 @@ class StreamHandler(ABC):
             self._audio_service.logger.debug(f'Audio buffer has bad size '
                                              f'(expected {len(audio_data)} % {self.pcm_format.width})')
         self._audio_service.route_buffer(stream_buffer)
-        self._done_frames += len(audio_data) / self.pcm_format.width
+        self._done_frames += len(audio_data) // self.pcm_format.width
         if self.direction == StreamDirection.INPUT:
             return None, pyaudio.paContinue
         elif self.direction == StreamDirection.OUTPUT:
@@ -270,6 +270,8 @@ class StreamHandler(ABC):
             if assume_complete:
                 self._done_event.set()
             return audio_data, pa_flag
+        else:
+            raise SyntaxError('We should not be here')
 
     @property
     def bus(self) -> str:
@@ -379,7 +381,7 @@ class OutputStreamHandler(StreamHandler):
 
 def write_to_async_pipe_sane(process: Process, pipe: Optional[asyncio.StreamWriter], data: bytes) -> None:
     """
-    Write to an async subprocess pipe catching and unifiying errors
+    Write to an async subprocess pipe catching and unifying errors
     :param process: the asyncio subprocess `Process`
     :param pipe: the asyncio subprocess pipe, a `StreamWriter` object
     :param data: the binary data to write
@@ -399,7 +401,7 @@ def write_to_async_pipe_sane(process: Process, pipe: Optional[asyncio.StreamWrit
 # pylint: disable=unused-argument
 async def read_from_async_pipe_sane(process: Process, pipe: Optional[asyncio.StreamReader], n: int) -> bytes:
     """
-    Read from an async subprocess pipe catching and unifiying errors
+    Read from an async subprocess pipe catching and unifying errors
     :param process: the asyncio subprocess `Process`
     :param pipe: the asyncio subprocess pipe, a `StreamWriter` object
     :param n: the number of bytes to read
@@ -800,12 +802,12 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
     async def ffmpeg_subprocess(self, ffmpeg_spec: ffmpeg.Stream, stdin: Union[int, IO, None] = None,
                                 stdout: Union[int, IO, None] = None, stderr: Union[int, IO, None] = None,
                                 kill_timeout: Optional[float] = None, logger: Optional[LoggerType] = None,
-                                error_callback: Optional[Callable[[Exception], ...]] = None) \
+                                error_callback: Optional[Callable[[Exception], Any]] = None) \
             -> AsyncContextManager[Process]:
         """
         Async context manager utility method to wrap a FFmpeg process
         :param ffmpeg_spec: a `Stream` object from ffmpeg-python library specifying the runtime options for FFmpeg
-        :param stdin: the stdin arugment for the subprocess call. If omitted, defaults to `subprocess.DEVNULL`
+        :param stdin: the stdin argument for the subprocess call. If omitted, defaults to `subprocess.DEVNULL`
         :param stdout: the stdout argument for the subprocess call. If omitted, defaults to `subprocess.DEVNULL`
         :param stderr: the stderr argument for the subprocess call. If omitted, defaults to `subprocess.DEVNULL`
         :param kill_timeout: the timeout in seconds to wait for the FFmpeg process to end before killing it.
