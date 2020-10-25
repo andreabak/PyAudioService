@@ -322,8 +322,8 @@ class BufferedAudioData:
                 self._data_buffer.seek(write_pos)  # Restore the previous buffer (write) position
             # If we're enforcing only writing and reading in `sample_width` chunks, our returned
             # audio data bytes length must be a multiple of that.
-            assert self._ensure_sample_width(len(data), nonraising=True), \
-                'Data length is not a multiple of sample_width'
+            if size != -1:
+                self._ensure_sample_width(len(data))
         else:
             data = b''  # Signals there's no new data in the buffer, but more might come in the future
         return data
