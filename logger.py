@@ -29,7 +29,7 @@ logging_lock: RLock = RLock()
 
 class ColorFormatter(logging.Formatter):
     """
-    Custome log formatter class to colorize log levels in console output
+    Custom log formatter class to colorize log levels in console output
     """
     LOG_COLORS: MutableMapping[str, int] = {
         'NOTSET': term.gray33,
