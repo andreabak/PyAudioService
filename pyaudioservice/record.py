@@ -16,8 +16,7 @@ import ffmpeg
 import numpy as np
 
 from ..logger import custom_log
-from .service import StreamBuffer, DEFAULT_FORMAT, AudioService, CHUNK_FRAMES, write_to_async_pipe_sane, \
-    ffmpeg_subprocess
+from .service import StreamBuffer, DEFAULT_FORMAT, AudioService, CHUNK_FRAMES, write_to_async_pipe_sane
 from .datatypes import PCMSampleFormat, PCMFormat
 
 
@@ -115,7 +114,9 @@ class AudioRecorder:  # TODO: Improve logging for class
                                            .filter('alimiter', attack=10, release=20) \
                                            .output(self._out_file_path,
                                                    **self._pcm_format.ffmpeg_args_nofmt, **self._encoder_options)
-        ffmpeg_context: AsyncContextManager[Process] = ffmpeg_subprocess(ffmpeg_spec, stdin=subprocess.PIPE, kill_timeout=5.0, logger=self.__log)
+        ffmpeg_context: AsyncContextManager[Process] = self._audio_service.ffmpeg_subprocess(
+            ffmpeg_spec, stdin=subprocess.PIPE, kill_timeout=5.0, logger=self.__log
+        )
         async with ffmpeg_context as ffmpeg_process:
             self._ffmpeg_process = ffmpeg_process
             try:
@@ -149,7 +150,7 @@ class AudioRecorder:  # TODO: Improve logging for class
                     time_frame: StreamBuffersTimeFrame = StreamBuffersTimeFrame(start_time=current_tf_time)
                     self._time_frames.append(time_frame)
 
-                    if self._stop_event.is_set() or self._audio_service.stop_event.is_set():
+                    if self._stop_event.is_set() or self._audio_service.check_exiting(dont_raise=True):
                         raise SystemExit
 
                     if len(self._time_frames) > self.FRAMES_DELAY:
