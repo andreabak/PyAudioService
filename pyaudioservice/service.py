@@ -16,16 +16,17 @@ from dataclasses import dataclass, field as dataclass_field
 from functools import partial
 from inspect import iscoroutinefunction
 from threading import Event, Thread
-from typing import Callable, TypedDict, Optional, Tuple, List, MutableMapping, Any, Union, Awaitable, Protocol, \
-    IO, Iterator, AsyncContextManager, ContextManager
+from typing import (Callable, TypedDict, Optional, Tuple, List, MutableMapping, Any, Union, Awaitable, Protocol,
+                    IO, Iterator, AsyncContextManager, ContextManager)
 
 import ffmpeg
 import pyaudio
 
-from .datatypes import PCMSampleFormat, PCMFormat, AudioDescriptor, AudioFileDescriptor, AudioBytesDescriptor, \
-    AudioStreamDescriptor, AudioPCMDescriptor, AudioEncodedDescriptor
-from ..common import BackgroundService, TimestampType, chunked
-from ..logger import custom_log, LoggerType
+from .common import BackgroundService, chunked
+from .logger import custom_log, LoggerType
+from .datatypes import (PCMSampleFormat, PCMFormat, AudioDescriptor, AudioFileDescriptor, AudioBytesDescriptor,
+                        AudioStreamDescriptor, AudioPCMDescriptor, AudioEncodedDescriptor)
+
 
 __all__ = [
     'CHUNK_FRAMES',
@@ -52,6 +53,9 @@ CHUNK_FRAMES = 1764  # 40ms @ 44100Hz
 
 DEFAULT_FORMAT: PCMFormat = PCMFormat(rate=44100, sample_fmt=PCMSampleFormat.int16, channels=1)
 """Default PCM audio format used by the audio service"""
+
+
+TimestampType = float
 
 
 class PyAudioStreamTimeInfo(TypedDict):
