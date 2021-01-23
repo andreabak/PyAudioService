@@ -2,6 +2,7 @@
 
 import asyncio
 import audioop
+import logging
 import os
 import subprocess
 import time
@@ -15,7 +16,6 @@ from typing import List, MutableMapping, Any, Optional, Union, Sequence, Deque, 
 import ffmpeg
 import numpy as np
 
-from .logger import custom_log
 from .datatypes import PCMSampleFormat, PCMFormat
 from .service import StreamBuffer, DEFAULT_FORMAT, AudioService, CHUNK_FRAMES, write_to_async_pipe_sane
 
@@ -23,6 +23,9 @@ from .service import StreamBuffer, DEFAULT_FORMAT, AudioService, CHUNK_FRAMES, w
 __all__ = [
     'AudioRecorder'
 ]
+
+
+logger: logging.Logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -34,7 +37,6 @@ class StreamBuffersTimeFrame:
     buffers: List[StreamBuffer] = dataclass_field(default_factory=list)
 
 
-@custom_log(component='RECORDING')
 class AudioRecorder:  # TODO: Improve logging for class
     """
     Class used for audio recording to a file from one or more audio buses within `AudioService`
@@ -90,8 +92,8 @@ class AudioRecorder:  # TODO: Improve logging for class
 
     def start(self) -> None:
         """Start the audio recording"""
-        self.__log.info(f'Starting recording for {"+".join(self._source_buses)} '
-                        f'on {os.path.basename(self._out_file_path)}')
+        logger.info(f'Starting recording for {"+".join(self._source_buses)} '
+                    f'on {os.path.basename(self._out_file_path)}')
         self._audio_service.ensure_running()
         asyncio.run_coroutine_threadsafe(self._start_recording(), self._audio_service.loop)
 
@@ -115,7 +117,7 @@ class AudioRecorder:  # TODO: Improve logging for class
                                            .output(self._out_file_path,
                                                    **self._pcm_format.ffmpeg_args_nofmt, **self._encoder_options)
         ffmpeg_context: AsyncContextManager[Process] = self._audio_service.ffmpeg_subprocess(
-            ffmpeg_spec, stdin=subprocess.PIPE, kill_timeout=5.0, logger=self.__log
+            ffmpeg_spec, stdin=subprocess.PIPE, kill_timeout=5.0
         )
         async with ffmpeg_context as ffmpeg_process:
             self._ffmpeg_process = ffmpeg_process
@@ -126,7 +128,7 @@ class AudioRecorder:  # TODO: Improve logging for class
                     pass
                 await self._time_frames_cleanup()
             except BrokenPipeError as exc:
-                self.__log.info(f'Force stopped recording: {exc}')
+                logger.info(f'Force stopped recording: {exc}')
                 raise
 
     async def _recording_loop(self) -> None:
@@ -158,7 +160,7 @@ class AudioRecorder:  # TODO: Improve logging for class
 
                     sleep_delay: float = current_tf_time - time.monotonic() + time_step
                     if (time_shift := time_step - sleep_delay) > time_step:
-                        self.__log.debug(f'Got some {time_shift*1000:.2f}ms of time shift on recording loop')
+                        logger.debug(f'Got some {time_shift*1000:.2f}ms of time shift on recording loop')
                     await asyncio.sleep(max(0.0, sleep_delay))
                     last_tf_time = current_tf_time
         finally:
@@ -206,16 +208,16 @@ class AudioRecorder:  # TODO: Improve logging for class
         :param stream_buffer: the `StreamBuffer`s audio data chunk passed by audio service
         """
         if not self._recording:
-            self.__log.debug('Cannot record audio buffer chunk: recording is not active!')
+            logger.debug('Cannot record audio buffer chunk: recording is not active!')
             return
         if not self._time_frames:
-            self.__log.warning('Received a buffer for recording but no time frames exist')
+            logger.warning('Received a buffer for recording but no time frames exist')
             return
         for time_frame in reversed(self._time_frames):
             if time_frame.start_time <= stream_buffer.start_time:
                 break
         else:
-            self.__log.warning('Couldn\'t find appropriate time frame for stream buffer.'
-                               'Buffer too old or discarded time frame')
+            logger.warning('Couldn\'t find appropriate time frame for stream buffer.'
+                           'Buffer too old or discarded time frame')
             return
         time_frame.buffers.append(stream_buffer)  # pylint: disable=undefined-loop-variable
