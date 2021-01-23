@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import audioop
 import enum
+import logging
 import subprocess
 import time
 import uuid
@@ -23,7 +24,6 @@ import ffmpeg
 import pyaudio
 
 from .common import BackgroundService, chunked
-from .logger import custom_log, LoggerType
 from .datatypes import (PCMSampleFormat, PCMFormat, AudioDescriptor, AudioFileDescriptor, AudioBytesDescriptor,
                         AudioStreamDescriptor, AudioPCMDescriptor, AudioEncodedDescriptor)
 
@@ -53,6 +53,9 @@ CHUNK_FRAMES = 1764  # 40ms @ 44100Hz
 
 DEFAULT_FORMAT: PCMFormat = PCMFormat(rate=44100, sample_fmt=PCMSampleFormat.int16, channels=1)
 """Default PCM audio format used by the audio service"""
+
+
+logger: logging.Logger = logging.getLogger(__name__)
 
 
 TimestampType = float
@@ -243,8 +246,7 @@ class StreamHandler(ABC):
         :return: the audio data in bytes for output (if an output stream). None if the stream is not an output stream.
         """
         if self.pcm_format is None:
-            self._audio_service.logger.error(f'Tried starting audio stream, '
-                                             f'but pcm_format was never specified for {self.__class__.__name__}')
+            logger.error(f'Tried starting audio stream, but pcm_format was never specified for {self.__class__.__name__}')
             return None, pyaudio.paAbort
         if self._start_time is None:
             self._start_time = time.monotonic()
@@ -254,15 +256,14 @@ class StreamHandler(ABC):
             audio_data: bytes = self._retrieve_audio_data(in_data=in_data, frame_count=frame_count,
                                                           time_info=time_info, status=status)
         except Exception as exc:  # pylint: disable=broad-except
-            self._audio_service.logger.error(f'Error in {self.__class__.__name__}: {exc}', exc_info=True)
+            logger.error(f'Error in {self.__class__.__name__}: {exc}', exc_info=True)
             return None, pyaudio.paAbort
         if not audio_data:
             self._done_event.set()
             return None, pyaudio.paComplete
         stream_buffer: StreamBuffer = StreamBuffer(audio_data, start_offset=self._done_frames, stream_handler=self)
         if not stream_buffer.check_size():
-            self._audio_service.logger.debug(f'Audio buffer has bad size '
-                                             f'(expected {len(audio_data)} % {self.pcm_format.width})')
+            logger.debug(f'Audio buffer has bad size (expected {len(audio_data)} % {self.pcm_format.width})')
         self._audio_service.route_buffer(stream_buffer)
         self._done_frames += len(audio_data) // self.pcm_format.width
         if self.direction == StreamDirection.INPUT:
@@ -504,7 +505,6 @@ class PlaybackCallable(Protocol):
     def __call__(self, *args, stream_handler: OutputStreamHandler, **kwargs) -> Awaitable: ...
 
 
-@custom_log(component='AUDIO')
 class AudioService(BackgroundService):  # TODO: Improve logging for class
     """
     Class for the main audio service.
@@ -613,14 +613,14 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
             task: asyncio.Task = self._loop.create_task(self._audio_main_async(), name='AsyncMain')
             self._loop.run_until_complete(task)
         finally:
-            self.__log.debug('Audio thread ended')
+            logger.debug('Audio thread ended')
 
     async def _audio_main_async(self) -> None:
         """Main entry point coroutine for the audio service (async)"""
         with self._own_pyaudio_context():
             while True:
                 if self._stop_event.is_set():
-                    self.__log.debug('Awaiting on pending tasks and stopping the event loop')
+                    logger.debug('Awaiting on pending tasks and stopping the event loop')
                     for task in asyncio.Task.all_tasks(self._loop):
                         if task.done() or task.get_name() == 'AsyncMain':
                             continue
@@ -677,7 +677,7 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
         if listener_handle in self._bus_listeners:
             self._bus_listeners.remove(listener_handle)
         else:
-            self.__log.warning(f'Attempted to remove unregistered bus listener: {repr(listener_handle)}')
+            logger.warning(f'Attempted to remove unregistered bus listener: {repr(listener_handle)}')
 
     @contextmanager
     def bus_listener(self, bus_name: str, callback: BusListenerCallback) -> ContextManager:
@@ -741,7 +741,7 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
             except SystemExit:
                 pass
             except Exception as exc:
-                self.__log.warning(f'Error in PyAudio stream: {exc}', exc_info=True)
+                logger.warning(f'Error in PyAudio stream: {exc}', exc_info=True)
                 stream_handler.set_error(exc)
                 raise
             finally:
@@ -775,7 +775,7 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
         except SystemExit:
             pass
         except Exception as exc:
-            self.__log.warning(f'Error in input PyAudio stream: {exc}', exc_info=True)
+            logger.warning(f'Error in input PyAudio stream: {exc}', exc_info=True)
             stream_handler.set_error(exc)
             raise
         finally:
@@ -805,7 +805,7 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
     @asynccontextmanager
     async def ffmpeg_subprocess(self, ffmpeg_spec: ffmpeg.Stream, stdin: Union[int, IO, None] = None,
                                 stdout: Union[int, IO, None] = None, stderr: Union[int, IO, None] = None,
-                                kill_timeout: Optional[float] = None, logger: Optional[LoggerType] = None,
+                                kill_timeout: Optional[float] = None,
                                 error_callback: Optional[Callable[[Exception], Any]] = None) \
             -> AsyncContextManager[Process]:
         """
@@ -816,7 +816,6 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
         :param stderr: the stderr argument for the subprocess call. If omitted, defaults to `subprocess.DEVNULL`
         :param kill_timeout: the timeout in seconds to wait for the FFmpeg process to end before killing it.
                              If omitted or None, it waits until the FFmpeg process ends on its own.
-        :param logger: a logger instance for logging messages, optional
         :param error_callback: a callback to send errors caught during the process termination phase
         :return: yields the FFmpeg process
         """
@@ -841,14 +840,12 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
                 error_msg = f'FFmpeg pipes broken: {exc}'
             else:
                 error_msg = f'Got exception within FFmpeg context: {exc}'
-            if logger:
-                logger.debug(error_msg)
+            logger.debug(error_msg)
             caught_exception = exc
             if not is_broken_pipe:
                 raise
         finally:
-            if logger:
-                logger.debug('FFmpeg terminating')
+            logger.debug('FFmpeg terminating')
             ffmpeg_retcode: Optional[int] = None
             did_timeout: bool = False
             try:
@@ -860,15 +857,13 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
                     error_msg = f'FFmpeg still running after {kill_timeout}s, killing it'
                 else:
                     error_msg = f'FFmpeg exited with return code {ffmpeg_retcode}'
-                if logger:
-                    logger.debug(error_msg)
+                logger.debug(error_msg)
                 if did_timeout:
                     ffmpeg_process.kill()
                 if error_callback:
                     error_callback(RuntimeError(error_msg))
             if caught_exception is not None or self.check_exiting(dont_raise=True):
-                if logger:
-                    logger.debug('Force closing subprocess transports')
+                logger.debug('Force closing subprocess transports')
                 close_protocol_with_transport(ffmpeg_process.stdin, force=True)
                 close_protocol_with_transport(ffmpeg_process.stdout, force=True)
                 close_protocol_with_transport(ffmpeg_process.stderr, force=True)
@@ -886,7 +881,7 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
         """
         ffmpeg_spec: ffmpeg.Stream = ffmpeg.input(**input_args).output('pipe:', **pcm_format.ffmpeg_args)
         async with self.ffmpeg_subprocess(ffmpeg_spec, stdin=subprocess.PIPE if pipe_stdin else subprocess.DEVNULL,
-                                          stdout=subprocess.PIPE, kill_timeout=2.0, logger=self.__log,
+                                          stdout=subprocess.PIPE, kill_timeout=2.0,
                                           error_callback=stream_handler.set_error) as ffmpeg_process:
 
             def read_stdout_pipe(frame_count: int) -> bytes:
@@ -920,7 +915,7 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
             except SystemExit:
                 pass
             except BrokenPipeError as exc:
-                self.__log.info(f'Force stopped playback: {exc}')
+                logger.info(f'Force stopped playback: {exc}')
                 raise
             finally:
                 ffmpeg_retcode: Optional[int]
