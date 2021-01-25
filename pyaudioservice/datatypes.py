@@ -16,23 +16,25 @@ import pyaudio
 
 
 __all__ = [
-    'PCMSampleFormat',
-    'PCMFormat',
-    'AudioDescriptor',
-    'AudioFileDescriptor',
-    'AudioBytesDescriptor',
-    'AudioStreamDescriptor',
-    'AudioPCMDescriptor',
-    'AudioEncodedDescriptor',
-    'AudioPCMBytesDescriptor',
-    'AudioEncodedBytesDescriptor',
-    'AudioPCMStreamDescriptor',
-    'AudioEncodedStreamDescriptor',
-    'BufferedAudioData',
+    "PCMSampleFormat",
+    "PCMFormat",
+    "AudioDescriptor",
+    "AudioFileDescriptor",
+    "AudioBytesDescriptor",
+    "AudioStreamDescriptor",
+    "AudioPCMDescriptor",
+    "AudioEncodedDescriptor",
+    "AudioPCMBytesDescriptor",
+    "AudioEncodedBytesDescriptor",
+    "AudioPCMStreamDescriptor",
+    "AudioEncodedStreamDescriptor",
+    "BufferedAudioData",
 ]
 
 
-PCMSampleFormatSpec = namedtuple('PCMSampleFormatSpec', 'width, portaudio_value, ffmpeg_name, numpy_type')
+PCMSampleFormatSpec = namedtuple(
+    "PCMSampleFormatSpec", "width, portaudio_value, ffmpeg_name, numpy_type"
+)
 """PCM sample format specifications as used by PCMSampleFormat"""
 
 
@@ -41,12 +43,19 @@ class PCMSampleFormat(enum.Enum):
     """
     An enum class to represent PCM sample formats.
     """
-    float32 = PCMSampleFormatSpec(4, pyaudio.paFloat32, 'f32le', np.float32)  # floating-point 32-bit little-endian
-    int32 = PCMSampleFormatSpec(4, pyaudio.paInt32, 's32le', np.int32)        # signed 32-bit little-endian
-    int24 = PCMSampleFormatSpec(3, pyaudio.paInt24, 's24le', None)            # signed 24-bit little-endian
-    int16 = PCMSampleFormatSpec(2, pyaudio.paInt16, 's16le', np.int16)        # signed 16-bit little-endian
-    int8 = PCMSampleFormatSpec(1, pyaudio.paInt8, 's8', np.int8)              # signed 8-bit
-    uint8 = PCMSampleFormatSpec(1, pyaudio.paUInt8, 'u8', np.uint8)           # unsigned 8-bit
+
+    float32 = PCMSampleFormatSpec(4, pyaudio.paFloat32, "f32le", np.float32)
+    """floating-point 32-bit little-endian"""
+    int32 = PCMSampleFormatSpec(4, pyaudio.paInt32, "s32le", np.int32)
+    """signed 32-bit little-endian"""
+    int24 = PCMSampleFormatSpec(3, pyaudio.paInt24, "s24le", None)
+    """signed 24-bit little-endian"""
+    int16 = PCMSampleFormatSpec(2, pyaudio.paInt16, "s16le", np.int16)
+    """signed 16-bit little-endian"""
+    int8 = PCMSampleFormatSpec(1, pyaudio.paInt8, "s8", np.int8)
+    """signed 8-bit"""
+    uint8 = PCMSampleFormatSpec(1, pyaudio.paUInt8, "u8", np.uint8)
+    """unsigned 8-bit"""
 
     @property
     def portaudio(self) -> int:
@@ -60,8 +69,10 @@ class PCMSampleFormat(enum.Enum):
 
     @property
     def numpy(self) -> Optional[np.number]:
-        """Numpy numeric type corresponding to the PCM sample format enum.
-        Can be None if unsupported (ie. 24-bit)"""
+        """
+        Numpy numeric type corresponding to the PCM sample format enum.
+        Can be None if unsupported (ie. 24-bit)
+        """
         return self.value.numpy_type
 
     @property
@@ -72,7 +83,8 @@ class PCMSampleFormat(enum.Enum):
     @classmethod
     def get_format_from_width(cls, width: int, unsigned=True) -> PCMSampleFormat:
         """
-        Returns the most likely `PCMSampleFormat` enum for the specified width (size in bytes).
+        Returns the most likely `PCMSampleFormat` enum
+        for the specified sample width (size in bytes).
         :param width: The desired sample width in bytes (1, 2, 3, or 4)
         :param unsigned: For 1 byte width, specifies whether signed or unsigned format.
         :return: a PCMSampleFormat enum
@@ -83,7 +95,7 @@ class PCMSampleFormat(enum.Enum):
             else:
                 return cls.int8
         elif unsigned:
-            raise ValueError('Unsigned PCM sample format is supported only for 8-bit')
+            raise ValueError("Unsigned PCM sample format is supported only for 8-bit")
         elif width == 2:
             return cls.int16
         elif width == 3:
@@ -91,18 +103,25 @@ class PCMSampleFormat(enum.Enum):
         elif width == 4:
             return cls.float32
         else:
-            raise ValueError(f"Invalid or unsupported PCM sample width: {width} ({width*8}-bit)")
+            raise ValueError(
+                f"Invalid or unsupported PCM sample width: {width} ({width*8}-bit)"
+            )
 
     def __str__(self) -> str:
         """Str representation for the PCM sample format enum"""
-        n_type: str = ' floating-point' if self == self.float32 else (' unsigned' if self == self.uint8 else '')
-        return f'{self.value.width * 8}-bit{n_type}'
+        n_type: str = (
+            " floating-point"
+            if self == self.float32
+            else (" unsigned" if self == self.uint8 else "")
+        )
+        return f"{self.value.width * 8}-bit{n_type}"
 
 
 class PyAudioStreamFormatArgs(TypedDict):
     """
     TypedDict that represents PCM format keyword arguments as used by PyAudio
     """
+
     rate: int
     format: int
     channels: int
@@ -112,8 +131,9 @@ class FFmpegFormatArgs(TypedDict):
     """
     TypedDict that represents PCM format commandline arguments for FFmpeg
     """
+
     ar: int  # Sampling frequency (rate) in Hz
-    f: str   # Format
+    f: str  # Format
     ac: int  # Audio channels
 
 
@@ -122,6 +142,7 @@ class PCMFormat:
     """
     A dataclass to raw PCM format parameters
     """
+
     rate: int
     """Sampling frequency (rate) in Hz"""
 
@@ -139,12 +160,16 @@ class PCMFormat:
     @property
     def pyaudio_args(self) -> PyAudioStreamFormatArgs:
         """PCM format as PyAudio keyword arguments"""
-        return PyAudioStreamFormatArgs(rate=self.rate, format=self.sample_fmt.portaudio, channels=self.channels)
+        return PyAudioStreamFormatArgs(
+            rate=self.rate, format=self.sample_fmt.portaudio, channels=self.channels
+        )
 
     @property
     def ffmpeg_args(self) -> FFmpegFormatArgs:
         """PCM format as FFmpeg commandline arguments"""
-        return FFmpegFormatArgs(ar=self.rate, f=self.sample_fmt.ffmpeg, ac=self.channels)
+        return FFmpegFormatArgs(
+            ar=self.rate, f=self.sample_fmt.ffmpeg, ac=self.channels
+        )
 
     @property
     def ffmpeg_args_nofmt(self) -> MutableMapping[str, Any]:
@@ -153,12 +178,15 @@ class PCMFormat:
 
     @property
     def width(self) -> int:
-        """Width (size in bytes) of the PCM format (= width of sample_fmt * n. of channels)"""
+        """
+        Width (size in bytes) of the PCM format
+        (= width of sample_fmt * n. of channels)
+        """
         return self.sample_fmt.width * self.channels
 
     def __str__(self) -> str:
         """Str representation for the PCM format"""
-        return f'{self.rate}Hz {self.sample_fmt} {self.channels}ch'
+        return f"{self.rate}Hz {self.sample_fmt} {self.channels}ch"
 
 
 class AudioDescriptor(ABC):
@@ -168,30 +196,35 @@ class AudioDescriptor(ABC):
 @dataclass
 class AudioFileDescriptor(AudioDescriptor):
     """Audio descriptor used for playback from a local file path"""
+
     path: str
 
 
 @dataclass
 class AudioBytesDescriptor(AudioDescriptor, ABC):
     """Abstract base class for audio descriptors with binary data (a bytes string)"""
+
     audio_data: bytes
 
 
 @dataclass
 class AudioStreamDescriptor(AudioDescriptor, ABC):
     """Abstract base class for audio descriptors with binary stream"""
+
     audio_stream: IO
 
 
 @dataclass
 class AudioPCMDescriptor(AudioDescriptor, ABC):
     """Abstract base class for audio descriptors with raw PCM audio data"""
+
     pcm_format: PCMFormat
 
 
 @dataclass
 class AudioEncodedDescriptor(AudioDescriptor, ABC):
     """Abstract base class for audio descriptors with encoded audio data"""
+
     codec: str
 
 
@@ -239,12 +272,18 @@ class BufferedAudioData:
     N.B. In the end the buffer will contain the whole written data,
          backed up by memory, until garbage-collected.
     """
-    def __init__(self, pcm_format: PCMFormat, frame_data: bytes = None, complete: bool = False):
+
+    def __init__(
+        self, pcm_format: PCMFormat, frame_data: bytes = None, complete: bool = False
+    ):
         """
         Initialization for `BufferedAudioData`
-        :param pcm_format: The PCM raw audio format, specified by an instance of `PCMFormat`
-        :param frame_data: Optional initial frame data in bytes, that will be put in the buffer
-        :param complete: Optional bool that if True signals that the provided data is considered complete
+        :param pcm_format: The PCM raw audio format, specified by an instance
+            of `PCMFormat`
+        :param frame_data: Optional initial frame data in bytes, that will be
+            stored in the buffer
+        :param complete: Optional bool that if True signals that the provided
+            data is considered complete
         """
         self.pcm_format: PCMFormat = pcm_format
         self._data_buffer: BytesIO = BytesIO()
@@ -272,12 +311,15 @@ class BufferedAudioData:
         """
         self._complete = True
 
-    def _ensure_sample_width(self, data_size: int, nonraising: bool = False) -> Optional[bool]:
+    def _ensure_sample_width(
+        self, data_size: int, nonraising: bool = False
+    ) -> Optional[bool]:
         """
         Ensures the specified data size is a multiple of the PCM format width
         :param data_size: The specified data size
         :param nonraising: Instead of raising an error, return a boolean
-        :return: a boolean indicated whether the data size is a multiple of the PCM format width
+        :return: if nonraising, a bool indicating whether the data size is a
+            multiple of the PCM format width
         :raise IOError: If the data size is not a multiple of the PCM format width
         """
         is_multiple: bool = (data_size % self.pcm_format.width) == 0
@@ -292,7 +334,7 @@ class BufferedAudioData:
         :raise BufferError: If the data is already considered complete
         """
         if self.complete:
-            raise BufferError('Buffer data is complete!')
+            raise BufferError("Buffer data is complete!")
         self._ensure_sample_width(len(data))
         with self._buffer_lock:
             self._data_buffer.write(data)
@@ -303,29 +345,35 @@ class BufferedAudioData:
         Read audio data from the buffer.
         Internally keeps track of the buffer's last read position.
         :param size: The amount of bytes to read. If omitted, all data will be
-                     read until the end of the buffer.
+            read until the end of the buffer.
         :raise EOFError: If there's no more data to read from the buffer and
-                         the data is considered to be complete.
+            the data is considered to be complete.
         :return: A bytes string of raw audio data. If no new data is present
-                 in the buffer since the last `read()` the returned bytes
-                 string will be empty (== b'').
+            in the buffer since the last `read()` the returned bytes string
+            will be empty (== b'').
         """
         if size != -1:
             self._ensure_sample_width(size)
         data: bytes
         if self.is_data_available():  # Raises EOFError if no data and self.complete
             with self._buffer_lock:  # Acquire lock while we're seeking cursor around and reading
-                write_pos = self._data_buffer.tell()  # Back up the current buffer (write) position
-                self._data_buffer.seek(self._read_pos)  # Seek to the last known read position
+                write_pos = (
+                    self._data_buffer.tell()
+                )  # Back up the current buffer (write) position
+                self._data_buffer.seek(
+                    self._read_pos
+                )  # Seek to the last known read position
                 data = self._data_buffer.read(size)  # Read data
                 self._read_pos = self._data_buffer.tell()  # Save the read position
-                self._data_buffer.seek(write_pos)  # Restore the previous buffer (write) position
+                self._data_buffer.seek(
+                    write_pos
+                )  # Restore the previous buffer (write) position
             # If we're enforcing only writing and reading in `sample_width` chunks, our returned
             # audio data bytes length must be a multiple of that.
             if size != -1:
                 self._ensure_sample_width(len(data))
         else:
-            data = b''  # Signals there's no new data in the buffer, but more might come in the future
+            data = b""  # Signals there's no new data in the buffer, but more might come in the future
         return data
 
     def is_data_available(self) -> bool:
@@ -333,12 +381,14 @@ class BufferedAudioData:
         Check if any data is available for reading.
         :return: True if data can be read, else False
         :raise EOFError: If there's no more data to read from the buffer and
-                         the data is considered to be complete.
+            the data is considered to be complete.
         """
         with self._buffer_lock:
             unread_data: bool = self._data_buffer.tell() > self._read_pos
         if not unread_data and self.complete:
-            raise EOFError('All data from the buffer has been read and data is complete')
+            raise EOFError(
+                "All data from the buffer has been read and data is complete"
+            )
         return unread_data
 
     def __len__(self) -> int:
@@ -382,4 +432,6 @@ class BufferedAudioData:
             if has_data:
                 yield self.read()  # Yield bytes to request to be sent
             else:
-                time.sleep(0.05)  # Short sleep, supposing we're doing this in a different thread
+                time.sleep(
+                    0.05
+                )  # Short sleep, supposing we're doing this in a different thread

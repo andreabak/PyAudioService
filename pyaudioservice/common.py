@@ -5,19 +5,21 @@ from threading import Event, Thread
 from typing import TypeVar, Sequence, Iterator
 
 
-ST = TypeVar('ST')
+ST = TypeVar("ST")
 
 
 def chunked(seq: Sequence[ST], n: int) -> Iterator[ST]:
     """Yield successive n-sized chunks from seq."""
     for i in range(0, len(seq), n):
-        yield seq[i:i + n]
+        yield seq[i : i + n]
 
 
 class BackgroundService(ABC):
     """
-    An abstract base class that implements basic interface and functionality for a background threaded service
+    An abstract base class that implements basic interface and functionality
+    for a background threaded service
     """
+
     def __init__(self):
         self._stop_event: Event = Event()
         self._thread: Thread = self._create_thread()
