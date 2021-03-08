@@ -705,18 +705,27 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
         for device_index, device_info in cls.get_audio_devices_info().items():
             input_chn: int = device_info["maxInputChannels"]
             output_chn: int = device_info["maxOutputChannels"]
+            specs: List[str] = []
+            channels_spec_t: str = "{n} {dir}ch"
             dev_type: str = "DUNNO?"
             if input_chn and output_chn:
                 dev_type = "IN+OUT"
+                specs += [
+                    channels_spec_t.format(n=input_chn, dir="in "),
+                    channels_spec_t.format(n=output_chn, dir="out "),
+                ]
             elif input_chn:
                 dev_type = "INPUT "
+                specs.append(channels_spec_t.format(n=input_chn, dir=""))
             elif output_chn:
                 dev_type = "OUTPUT"
+                specs.append(channels_spec_t.format(n=output_chn, dir=""))
+            rate: int = int(float(device_info["defaultSampleRate"]))
+            specs.append(f"{rate:5d} Hz")
             name: str = device_info["name"]
-            rate: str = str(device_info["defaultSampleRate"])
             # width = dev.get('')
             print(
-                f"Index {device_index:2} [{dev_type}]: {name} (Max Channels {input_chn}, Default @ {int(rate)} Hz)"
+                f"Index {device_index:2} {dev_type} ({', '.join(specs)}): " f"{name} "
             )
 
     def __init__(
