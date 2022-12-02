@@ -1,7 +1,5 @@
+import os.path as osp
 from setuptools import setup
-
-
-import pyaudioservice
 
 
 def get_requirements():
@@ -17,17 +15,24 @@ def get_long_description():
         return None
 
 
+about = {}
+with open(
+    osp.join(osp.dirname(__file__), "pyaudioservice", "__version__.py"), "r"
+) as fp:
+    exec(fp.read(), about)
+
+
 setup(
-    name="PyAudioService",
-    url="https://github.com/andreabak/PyAudioService",
-    author="abk16",
-    author_email="abk16@mailbox.org",
+    name=about["__title__"],
+    description=about["__description__"],
+    url=about["__url__"],
+    author=about["__author__"],
+    author_email=about["__author_email__"],
     packages=["pyaudioservice"],
     python_requires=">=3.8",
     install_requires=get_requirements(),
-    version=pyaudioservice.__version__,
-    license="LGPLv3",
-    description="A small Python async audio service framework based on PyAudio/PortAudio and FFmpeg",
+    version=about["__version__"],
+    license=about["__license__"],
     long_description=get_long_description(),
     long_description_content_type="text/markdown",
 )

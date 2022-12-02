@@ -1,6 +1,6 @@
 """Package with classes and modules related to audio acquisition, playback and recording"""
 
-__version__ = "0.1.1"
+from .__version__ import __version__
 
 from . import datatypes
 from . import service
