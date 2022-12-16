@@ -388,6 +388,12 @@ class StreamHandler(ABC):
 
     def set_error(self, error: Exception) -> None:
         """Store an error related to the stream handler instance"""
+        if not isinstance(error, Exception):
+            raise TypeError(f"Expected exception object, got {error!r}")
+        # chain exceptions, simulating `raise from` behavior
+        if self.stream_error is not None:
+            error.__cause__ = self.stream_error
+
         self.stream_error = error
 
     @property
@@ -908,15 +914,15 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
             )
         else:
             raise AttributeError(f"Invalid direction for PyAudio stream: {direction}")
-        with closing(
-            self._pa.open(
-                **stream_handler.pcm_format.pyaudio_args,
-                frames_per_buffer=self.CHUNK_FRAMES,
-                **direction_kwargs,
-                stream_callback=stream_handler.pa_callback,
-            )
-        ) as stream:
-            try:
+        try:
+            with closing(
+                self._pa.open(
+                    **stream_handler.pcm_format.pyaudio_args,
+                    frames_per_buffer=self.CHUNK_FRAMES,
+                    **direction_kwargs,
+                    stream_callback=stream_handler.pa_callback,
+                )
+            ) as stream:
                 stream.start_stream()
                 try:
                     self.check_exiting()
@@ -924,15 +930,14 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
                         await asyncio.sleep(0.02)
                 finally:
                     stream.stop_stream()
-            except SystemExit:
-                pass
-            except Exception as exc:
-                logger.warning(f"Error in PyAudio stream: {exc}", exc_info=True)
-                stream_handler.set_error(exc)
-                raise
-            finally:
-                stream_handler.done_event.set()
-                stream_handler.stop_event.set()
+        except SystemExit:
+            pass
+        except Exception as exc:
+            logger.error(f"Error in PyAudio stream: {exc}", exc_info=True)
+            stream_handler.set_error(exc)
+        finally:
+            stream_handler.done_event.set()
+            stream_handler.stop_event.set()
 
     async def _pa_acquire(self, stream_handler: InputStreamHandler) -> None:
         """
@@ -1281,6 +1286,8 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
         if blocking:
             while not stream_handler.done_event.is_set():
                 time.sleep(0.1)  # Using short sleeps for faster ctrl-c breaking
+            if stream_handler.stream_error is not None:
+                raise stream_handler.stream_error
         return stream_handler
 
     def play_data(
