@@ -787,7 +787,7 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
                     logger.debug(
                         "Awaiting on pending tasks and stopping the event loop"
                     )
-                    for task in asyncio.Task.all_tasks(self._loop):
+                    for task in asyncio.all_tasks(self._loop):
                         if task.done() or task.get_name() == "AsyncMain":
                             continue
                         await task
