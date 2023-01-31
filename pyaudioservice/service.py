@@ -56,6 +56,7 @@ __all__ = [
     "FormatConverter",
     "BufferWriteCallback",
     "BufferReadCallback",
+    "StreamDirection",
     "StreamBuffer",
     "InputStreamHandler",
     "OutputStreamHandler",
