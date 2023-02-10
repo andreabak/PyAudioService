@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import audioop
 import enum
 import logging
 import subprocess
@@ -53,7 +52,6 @@ from .datatypes import (
 __all__ = [
     "CHUNK_FRAMES",
     "DEFAULT_FORMAT",
-    "FormatConverter",
     "BufferWriteCallback",
     "BufferReadCallback",
     "StreamDirection",
@@ -108,75 +106,6 @@ PyAudioStreamCallback = Callable[
 ]
 BufferReadCallback = Callable[[int], bytes]
 BufferWriteCallback = Callable[[bytes, PCMFormat], None]
-
-
-class FormatConverter:
-    """
-    Class used to convert a raw PCM audio stream from one format to another.
-    Use one instance only for one continuous audio stream.
-    """
-
-    def __init__(self, source_format: PCMFormat, dest_format: PCMFormat):
-        """
-        Initialization for `FormatConverter`. Use only for one stream at a time.
-        :param source_format: a `PCMFormat` object specifying the source PCM format
-        :param dest_format: a `PCMFormat` object specifying the destination PCM format
-        """
-        if any(
-            f.sample_fmt == PCMSampleFormat.float32 or f.channels not in (1, 2)
-            for f in (source_format, dest_format)
-        ):
-            raise ValueError("Only integer stereo or mono PCM samples are supported")
-        self.source_format: PCMFormat = source_format
-        self.dest_format: PCMFormat = dest_format
-        self._ratecv_state: Any = None  # Unknown type
-
-    def convert(self, fragment: bytes) -> bytes:
-        """
-        Convert an audio fragment
-        :param fragment: the source audio fragment in bytes
-        :return: the converted audio fragment in bytes
-        :raise ValueError: if the length of the source fragment is not a multiple
-            of source_format.width
-        """
-        if len(fragment) % self.source_format.width != 0:
-            raise ValueError(
-                'Length of audio fragment must be a multiple of "source_format.width"'
-            )
-        if self.source_format.sample_fmt.width != self.dest_format.sample_fmt.width:
-            fragment = audioop.lin2lin(
-                fragment,
-                self.source_format.sample_fmt.width,
-                self.dest_format.sample_fmt.width,
-            )
-        if self.source_format.rate != self.dest_format.rate:
-            fragment, self._ratecv_state = audioop.ratecv(
-                fragment,
-                self.dest_format.sample_fmt.width,
-                self.source_format.channels,
-                self.source_format.rate,
-                self.dest_format.rate,
-                self._ratecv_state,
-            )
-        if self.source_format.channels != self.dest_format.channels:
-            if any(
-                ch_num not in (1, 2)
-                for ch_num in (self.source_format.channels, self.dest_format.channels)
-            ):
-                raise ValueError(
-                    "Only stereo-to-mono or mono-to-stereo conversions are supported"
-                )
-            if self.source_format.channels == 2:
-                fragment = audioop.tomono(
-                    fragment, self.dest_format.sample_fmt.width, 1.0, 1.0
-                )
-            elif self.source_format.channels == 1:
-                fragment = audioop.tostereo(
-                    fragment, self.dest_format.sample_fmt.width, 1.0, 1.0
-                )
-        if self.dest_format.sample_fmt == PCMSampleFormat.uint8:
-            fragment = audioop.bias(fragment, 1, 128)
-        return fragment
 
 
 @dataclass
