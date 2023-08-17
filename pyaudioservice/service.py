@@ -70,12 +70,12 @@ __all__ = [
 ]
 
 
-CHUNK_FRAMES = 1764  # 40ms @ 44100Hz
+CHUNK_FRAMES = 1920  # 40ms @ 48000Hz
 """Default chunk size in number of audio frames (samples per channel)
 used for buffering and streaming"""
 
 DEFAULT_FORMAT: PCMFormat = PCMFormat(
-    rate=44100, sample_fmt=PCMSampleFormat.float32, channels=1
+    rate=48000, sample_fmt=PCMSampleFormat.float32, channels=1
 )
 """Default PCM audio format used by the audio service"""
 
