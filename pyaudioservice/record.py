@@ -67,15 +67,15 @@ class AudioRecorderBase(ABC):
 
     def __init__(
         self,
-        pcm_format: Optional[PCMFormat] = None,
         out_file_path: PathType,
+        out_pcm_format: Optional[PCMFormat] = None,
         encoder_options: Optional[MutableMapping[str, Any]] = None,
         event_loop: Optional[asyncio.AbstractEventLoop] = None,
     ):
         """
         Constructor for `AudioRecorder`
         :param out_file_path: path for the recorded audio file
-        :param pcm_format: the PCM format used for the output recorded audio file
+        :param out_pcm_format: the PCM format used for the output recorded audio file
             (sample format might be ignored). If omitted, the default PCM format
             will be used instead.
         :param encoder_options: FFmpeg audio encoder commandline options.
@@ -84,10 +84,10 @@ class AudioRecorderBase(ABC):
         self._event_loop: asyncio.AbstractEventLoop = (
             event_loop if event_loop is not None else asyncio.get_running_loop()
         )
-        if pcm_format is None:
-            pcm_format = DEFAULT_FORMAT
-        self._pcm_format: PCMFormat = pcm_format
         self._out_file_path: str = str(out_file_path)
+        if out_pcm_format is None:
+            out_pcm_format = DEFAULT_FORMAT
+        self._out_pcm_format: PCMFormat = out_pcm_format
         if encoder_options is None:
             encoder_options = self.DEFAULT_ENCODER_OPTIONS
         self._encoder_options: MutableMapping[str, Any] = encoder_options
@@ -137,7 +137,7 @@ class AudioRecorderBase(ABC):
             .filter("alimiter", attack=10, release=20)
             .output(
                 self._out_file_path,
-                **self._pcm_format.ffmpeg_args_nofmt,
+                **self._out_pcm_format.ffmpeg_args_nofmt,
                 **self._encoder_options,
             )
         )
@@ -164,7 +164,7 @@ class AudioRecorderBase(ABC):
         Internal coroutine that handles the recording loop
         within `AudioService`'s asyncio loop
         """
-        time_step: float = self._frame_size * self._pcm_format.sample_duration
+        time_step: float = self._frame_size * self._out_pcm_format.sample_duration
         start_time: float = ref_clock()
         last_tick: Optional[float] = None
         self._recording = True
@@ -238,7 +238,7 @@ class BusAudioRecorder(AudioRecorderBase):
         audio_service: AudioService,
         out_file_path: PathType,
         source_buses: Union[Sequence[str], str],
-        pcm_format: Optional[PCMFormat] = None,
+        out_pcm_format: Optional[PCMFormat] = None,
         encoder_options: Optional[MutableMapping[str, Any]] = None,
     ):
         """
@@ -248,7 +248,7 @@ class BusAudioRecorder(AudioRecorderBase):
         :param source_buses: the audio buses within the `AudioService` instance
             from which to record audio. Can be either a sequence of bus names,
             or a string for a single bus.
-        :param pcm_format: the PCM format used for the output recorded audio file
+        :param out_pcm_format: the PCM format used for the output recorded audio file
             (sample format might be ignored). If omitted, the default PCM format
             will be used instead.
         :param encoder_options: FFmpeg audio encoder commandline options.
@@ -258,7 +258,7 @@ class BusAudioRecorder(AudioRecorderBase):
 
         super().__init__(
             out_file_path=out_file_path,
-            pcm_format=pcm_format,
+            out_pcm_format=out_pcm_format,
             encoder_options=encoder_options,
             event_loop=self._audio_service.loop,
         )
@@ -387,16 +387,18 @@ class StreamAudioRecorder(AudioRecorderBase):
     def __init__(
         self,
         stream: IO[bytes],
-        pcm_format: Optional[PCMFormat] = None,
+        pcm_format: PCMFormat,
         out_file_path: PathType,
+        out_pcm_format: Optional[PCMFormat] = None,
         encoder_options: Optional[MutableMapping[str, Any]] = None,
         event_loop: Optional[asyncio.AbstractEventLoop] = None,
     ):
         """
         Constructor for `StreamAudioRecorder`
-        :param out_file_path: path for the recorded audio file
         :param stream: the binary stream to record from
-        :param pcm_format: the PCM format used for the output recorded audio file
+        :param pcm_format: the PCM format of the binary stream
+        :param out_file_path: path for the recorded audio file
+        :param out_pcm_format: the PCM format used for the output recorded audio file
             (sample format might be ignored). If omitted, the default PCM format
             will be used instead.
         :param encoder_options: FFmpeg audio encoder commandline options.
@@ -405,12 +407,15 @@ class StreamAudioRecorder(AudioRecorderBase):
         """
         super().__init__(
             out_file_path=out_file_path,
-            pcm_format=pcm_format,
+            out_pcm_format=out_pcm_format,
             encoder_options=encoder_options,
             event_loop=event_loop,
         )
-        if pcm_format != self.INTERNAL_FORMAT:
-            stream = ResampleStreamReader(stream, pcm_format, self.INTERNAL_FORMAT)
+        self._pcm_format: PCMFormat = pcm_format
+        if self._pcm_format != self._out_pcm_format:
+            stream = ResampleStreamReader(
+                stream, self._pcm_format, self._out_pcm_format
+            )
         self._stream: IO[bytes] = stream
 
     @asynccontextmanager
