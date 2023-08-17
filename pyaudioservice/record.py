@@ -26,6 +26,7 @@ from typing import (
 import ffmpeg
 import numpy as np
 
+from .common import ref_clock
 from .datatypes import PCMSampleFormat, PCMFormat
 from .service import (
     StreamBuffer,
@@ -49,7 +50,7 @@ class StreamBuffersTimeFrame:
     A dataclass where received `StreamBuffer`s for a certain time frame are stored
     """
 
-    start_time: float = dataclass_field(default_factory=time.monotonic)
+    start_time: float = dataclass_field(default_factory=ref_clock)
     buffers: List[StreamBuffer] = dataclass_field(default_factory=list)
 
 
@@ -181,7 +182,7 @@ class AudioRecorder:  # TODO: Improve logging for class
         within `AudioService`'s asyncio loop
         """
         time_step: float = self._frame_size * self._pcm_format.sample_duration
-        start_time: float = time.monotonic()
+        start_time: float = ref_clock()
         last_tf_time: Optional[float] = None
         self._recording = True
         try:
@@ -211,7 +212,7 @@ class AudioRecorder:  # TODO: Improve logging for class
                     if len(self._time_frames) > self.FRAMES_DELAY:
                         await self._save_time_frame(self._time_frames.popleft())
 
-                    sleep_delay: float = current_tf_time - time.monotonic() + time_step
+                    sleep_delay: float = current_tf_time - ref_clock() + time_step
                     if (time_shift := time_step - sleep_delay) > time_step:
                         logger.debug(
                             f"Got {time_shift*1000:.2f}ms time shift on recording loop"

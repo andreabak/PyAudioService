@@ -36,7 +36,7 @@ from typing import (
 import ffmpeg
 import pyaudio
 
-from .common import BackgroundService, chunked
+from .common import BackgroundService, chunked, ref_clock
 from .datatypes import (
     PCMSampleFormat,
     PCMFormat,
@@ -258,7 +258,7 @@ class StreamHandler(ABC):
             )
             return None, pyaudio.paAbort
         if self._start_time is None:
-            self._start_time = time.monotonic()
+            self._start_time = ref_clock()
         if self._stop_event.is_set():
             return None, pyaudio.paAbort
         try:

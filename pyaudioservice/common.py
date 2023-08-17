@@ -1,8 +1,12 @@
 """Module with common functions and classes"""
-
+import time
 from abc import ABC, abstractmethod
 from threading import Event, Thread
-from typing import TypeVar, Sequence, Iterator
+from typing import TypeVar, Sequence, Iterator, Callable
+
+
+ref_clock: Callable[[], float] = time.perf_counter
+ref_clock_ns: Callable[[], int] = time.perf_counter_ns
 
 
 ST = TypeVar("ST")
