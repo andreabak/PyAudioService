@@ -297,6 +297,13 @@ class StreamHandler(ABC):
         else:
             raise SyntaxError("We should not be here")
 
+    def wait(self) -> None:
+        """Wait for the stream to finish, raising an error if one was caught"""
+        while not self.done_event.is_set():
+            time.sleep(0.05)  # Using short sleeps for faster ctrl-c breaking
+        if self.stream_error is not None:
+            raise self.stream_error
+
     @property
     def bus(self) -> str:
         """The audio bus name from `AudioService` correlated with this stream"""
@@ -1220,10 +1227,7 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
             playback_callable(stream_handler=stream_handler), self._loop
         )
         if blocking:
-            while not stream_handler.done_event.is_set():
-                time.sleep(0.1)  # Using short sleeps for faster ctrl-c breaking
-            if stream_handler.stream_error is not None:
-                raise stream_handler.stream_error
+            stream_handler.wait()
         return stream_handler
 
     def play_data(
