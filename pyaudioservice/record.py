@@ -109,7 +109,10 @@ class AudioRecorderBase(ABC):
 
     def start(self) -> None:
         """Start the audio recording"""
-        asyncio.run_coroutine_threadsafe(self._start_recording(), self._event_loop)
+        if self._recording:
+            logger.warning("Audio recording already active!")
+            return
+        self._event_loop.create_task(self._start_recording())
 
     def stop(self) -> None:
         """Stop the audio recording"""
@@ -188,6 +191,9 @@ class AudioRecorderBase(ABC):
                         )
                     await asyncio.sleep(max(0.0, sleep_delay))
                     last_tick = tick
+        except:
+            logger.exception("Error in recording loop")
+            raise
         finally:
             self._recording = False
 
