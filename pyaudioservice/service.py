@@ -75,7 +75,7 @@ CHUNK_FRAMES = 1764  # 40ms @ 44100Hz
 used for buffering and streaming"""
 
 DEFAULT_FORMAT: PCMFormat = PCMFormat(
-    rate=44100, sample_fmt=PCMSampleFormat.int16, channels=1
+    rate=44100, sample_fmt=PCMSampleFormat.float32, channels=1
 )
 """Default PCM audio format used by the audio service"""
 
