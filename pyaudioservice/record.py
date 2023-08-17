@@ -1,14 +1,13 @@
 """Audio recording functionality"""
-
 import asyncio
 import audioop
 import logging
 import os
 import subprocess
-import time
+from abc import ABC, abstractmethod
 from asyncio.subprocess import Process
 from collections import deque
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext, asynccontextmanager
 from dataclasses import dataclass, field as dataclass_field
 from threading import Event
 from typing import (
@@ -38,29 +37,20 @@ from .service import (
 )
 
 
-__all__ = ["AudioRecorder"]
+__all__ = [
+    "AudioRecorderBase",
+    "BusAudioRecorder",
+    "AudioRecorder",
+]
 
 
 logger: logging.Logger = logging.getLogger(__name__)
 
 
-@dataclass
-class StreamBuffersTimeFrame:
+class AudioRecorderBase(ABC):
     """
-    A dataclass where received `StreamBuffer`s for a certain time frame are stored
+    Base class for audio recording to a file (using FFmpeg)
     """
-
-    start_time: float = dataclass_field(default_factory=ref_clock)
-    buffers: List[StreamBuffer] = dataclass_field(default_factory=list)
-
-
-class AudioRecorder:  # TODO: Improve logging for class
-    """
-    Class used for audio recording to a file from one or more audio buses of `AudioService`
-    """
-
-    FRAMES_DELAY: int = 10
-    """Time frames to buffer before combining audio chunks and saving them"""
 
     INTERNAL_FORMAT: PCMFormat = PCMFormat(
         rate=DEFAULT_FORMAT.rate,
@@ -74,32 +64,24 @@ class AudioRecorder:  # TODO: Improve logging for class
 
     def __init__(
         self,
-        audio_service: AudioService,
         out_file_path: str,
-        source_buses: Union[Sequence[str], str],
         pcm_format: Optional[PCMFormat] = None,
         encoder_options: Optional[MutableMapping[str, Any]] = None,
+        event_loop: Optional[asyncio.AbstractEventLoop] = None,
     ):
         """
         Constructor for `AudioRecorder`
-        :param audio_service: the `AudioService` instance from which to record audio
         :param out_file_path: path for the recorded audio file
-        :param source_buses: the audio buses within the `AudioService` instance
-            from which to record audio. Can be either a sequence of bus names,
-            or a string for a single bus.
         :param pcm_format: the PCM format used for the output recorded audio file
             (sample format might be ignored). If omitted, the default PCM format
             will be used instead.
         :param encoder_options: FFmpeg audio encoder commandline options.
             If omitted the default ones will be used.
         """
-        self._audio_service: AudioService = audio_service
+        self._event_loop: asyncio.AbstractEventLoop = (
+            event_loop if event_loop is not None else asyncio.get_running_loop()
+        )
         self._out_file_path: str = out_file_path
-        if not source_buses:
-            raise ValueError("Must specify at least one source bus for recording")
-        if isinstance(source_buses, str):
-            source_buses = [source_buses]
-        self._source_buses: Sequence[str] = source_buses
         if pcm_format is None:
             pcm_format = DEFAULT_FORMAT
         self._pcm_format: PCMFormat = pcm_format
@@ -107,7 +89,6 @@ class AudioRecorder:  # TODO: Improve logging for class
             encoder_options = self.DEFAULT_ENCODER_OPTIONS
         self._encoder_options: MutableMapping[str, Any] = encoder_options
 
-        self._time_frames: Deque[StreamBuffersTimeFrame] = deque()
         self._frame_size: int = CHUNK_FRAMES
         self._ffmpeg_process: Optional[Process] = None
         self._recording: bool = False
@@ -120,18 +101,14 @@ class AudioRecorder:  # TODO: Improve logging for class
 
     def start(self) -> None:
         """Start the audio recording"""
-        logger.info(
-            f'Starting recording for {"+".join(self._source_buses)} '
-            f"on {os.path.basename(self._out_file_path)}"
-        )
-        self._audio_service.ensure_running()
-        asyncio.run_coroutine_threadsafe(
-            self._start_recording(), self._audio_service.loop
-        )
+        asyncio.run_coroutine_threadsafe(self._start_recording(), self._event_loop)
 
     def stop(self) -> None:
         """Stop the audio recording"""
         self._stop_event.set()
+
+    async def _check_exiting(self):
+        return self._stop_event.is_set()
 
     @contextmanager
     def record(self) -> ContextManager:
@@ -156,9 +133,7 @@ class AudioRecorder:  # TODO: Improve logging for class
                 **self._encoder_options,
             )
         )
-        ffmpeg_context: AsyncContextManager[
-            Process
-        ] = async_ffmpeg_subprocess(
+        ffmpeg_context: AsyncContextManager[Process] = async_ffmpeg_subprocess(
             ffmpeg_spec,
             stdin=subprocess.PIPE,
             kill_timeout=5.0,
@@ -171,7 +146,7 @@ class AudioRecorder:  # TODO: Improve logging for class
                     await self._recording_loop()
                 except SystemExit:
                     pass
-                await self._time_frames_cleanup()
+                await self._close_recording()
             except BrokenPipeError as exc:
                 logger.info(f"Force stopped recording: {exc}")
                 raise
@@ -183,53 +158,148 @@ class AudioRecorder:  # TODO: Improve logging for class
         """
         time_step: float = self._frame_size * self._pcm_format.sample_duration
         start_time: float = ref_clock()
-        last_tf_time: Optional[float] = None
+        last_tick: Optional[float] = None
         self._recording = True
+        try:
+            async with self._make_recording_context():
+                while True:
+                    tick: float = (
+                        start_time if last_tick is None else last_tick + time_step
+                    )
+
+                    if await self._check_exiting():
+                        raise SystemExit
+
+                    await self._record_step(tick)
+
+                    sleep_delay: float = tick - ref_clock() + time_step
+                    # TODO: log infrequently
+                    if (time_shift := time_step - sleep_delay) > time_step:
+                        logger.debug(
+                            f"Got {time_shift*1000:.2f}ms time shift on recording loop"
+                        )
+                    await asyncio.sleep(max(0.0, sleep_delay))
+                    last_tick = tick
+        finally:
+            self._recording = False
+
+    async def _write_output(self, out_buffer: bytes):
+        assert self._ffmpeg_process is not None
+        write_to_async_pipe_sane(
+            self._ffmpeg_process, self._ffmpeg_process.stdin, out_buffer
+        )
+
+    async def _close_recording(self):
+        await self._write_output(b"\0")
+        self._ffmpeg_process.stdin.close()
+
+    async def _make_recording_context(self) -> AsyncContextManager:
+        """
+        Prepare a context manager that should prepare resources for starting recording, and cleaning up afterwards.
+        """
+        return nullcontext()
+
+    @abstractmethod
+    def _record_step(self, tick: float):
+        """
+        Record a single step of the loop of the recording process.
+        """
+
+
+@dataclass
+class StreamBuffersTimeFrame:
+    """
+    A dataclass where received `StreamBuffer`s for a certain time frame are stored
+    """
+
+    start_time: float = dataclass_field(default_factory=ref_clock)
+    buffers: List[StreamBuffer] = dataclass_field(default_factory=list)
+
+
+# TODO: Improve logging for class
+class BusAudioRecorder(AudioRecorderBase):
+    """
+    Class used for audio recording to a file from one or more audio buses of `AudioService`
+    """
+
+    FRAMES_DELAY: int = 10
+    """Time frames to buffer before combining audio chunks and saving them"""
+
+    def __init__(
+        self,
+        audio_service: AudioService,
+        out_file_path: str,
+        source_buses: Union[Sequence[str], str],
+        pcm_format: Optional[PCMFormat] = None,
+        encoder_options: Optional[MutableMapping[str, Any]] = None,
+    ):
+        """
+        Constructor for `AudioRecorder`
+        :param audio_service: the `AudioService` instance from which to record audio
+        :param out_file_path: path for the recorded audio file
+        :param source_buses: the audio buses within the `AudioService` instance
+            from which to record audio. Can be either a sequence of bus names,
+            or a string for a single bus.
+        :param pcm_format: the PCM format used for the output recorded audio file
+            (sample format might be ignored). If omitted, the default PCM format
+            will be used instead.
+        :param encoder_options: FFmpeg audio encoder commandline options.
+            If omitted the default ones will be used.
+        """
+        self._audio_service: AudioService = audio_service
+
+        super().__init__(
+            out_file_path=out_file_path,
+            pcm_format=pcm_format,
+            encoder_options=encoder_options,
+            event_loop=self._audio_service.loop,
+        )
+
+        if not source_buses:
+            raise ValueError("Must specify at least one source bus for recording")
+        if isinstance(source_buses, str):
+            source_buses = [source_buses]
+        self._source_buses: Sequence[str] = source_buses
+
+        self._time_frames: Deque[StreamBuffersTimeFrame] = deque()
+
+    def start(self) -> None:
+        """Start the audio recording"""
+        logger.info(
+            f'Starting recording for {"+".join(self._source_buses)} '
+            f"on {os.path.basename(self._out_file_path)}"
+        )
+        self._audio_service.ensure_running()
+        super().start()
+
+    def _check_exiting(self):
+        return super()._check_exiting() or self._audio_service.check_exiting(
+            dont_raise=True
+        )
+
+    @asynccontextmanager
+    async def _make_recording_context(self) -> AsyncContextManager:
         try:
             with ExitStack() as buses_stack:
                 for bus in self._source_buses:  # Attach recorder to all buses
                     buses_stack.enter_context(
                         self._audio_service.bus_listener(bus, self.record_buffer)
                     )
+                yield buses_stack
+        except SystemExit:
+            pass
+        await self._time_frames_cleanup()
 
-                while True:
-                    current_tf_time: float
-                    if last_tf_time is None:
-                        current_tf_time = start_time
-                    else:
-                        current_tf_time = last_tf_time + time_step
-
-                    time_frame: StreamBuffersTimeFrame = StreamBuffersTimeFrame(
-                        start_time=current_tf_time
-                    )
-                    self._time_frames.append(time_frame)
-
-                    if self._stop_event.is_set() or self._audio_service.check_exiting(
-                        dont_raise=True
-                    ):
-                        raise SystemExit
-
-                    if len(self._time_frames) > self.FRAMES_DELAY:
-                        await self._save_time_frame(self._time_frames.popleft())
-
-                    sleep_delay: float = current_tf_time - ref_clock() + time_step
-                    if (time_shift := time_step - sleep_delay) > time_step:
-                        logger.debug(
-                            f"Got {time_shift*1000:.2f}ms time shift on recording loop"
-                        )
-                    await asyncio.sleep(max(0.0, sleep_delay))
-                    last_tf_time = current_tf_time
-        finally:
-            self._recording = False
+    async def _record_step(self, tick: float):
+        time_frame: StreamBuffersTimeFrame = StreamBuffersTimeFrame(start_time=tick)
+        self._time_frames.append(time_frame)
+        if len(self._time_frames) > self.FRAMES_DELAY:
+            await self._save_time_frame(self._time_frames.popleft())
 
     async def _time_frames_cleanup(self) -> None:
         """Internal coroutine that cleans up and saves pending time frames"""
         while self._time_frames:
             await self._save_time_frame(self._time_frames.popleft())
-        write_to_async_pipe_sane(
-            self._ffmpeg_process, self._ffmpeg_process.stdin, b"\0"
-        )
-        self._ffmpeg_process.stdin.close()
 
     async def _save_time_frame(self, time_frame: StreamBuffersTimeFrame) -> None:
         """
@@ -240,7 +310,7 @@ class AudioRecorder:  # TODO: Improve logging for class
         internal_fmt_channels: int = self.INTERNAL_FORMAT.channels
         internal_fmt_numpy: np.number = self.INTERNAL_FORMAT.sample_fmt.numpy
         # Okay...
-        cum_buffer: np.ndarray = np.zeros(
+        mix_buffer: np.ndarray = np.zeros(
             self._frame_size * internal_fmt_channels, dtype=internal_fmt_numpy
         )
         for stream_buffer in time_frame.buffers:
@@ -265,18 +335,15 @@ class AudioRecorder:  # TODO: Improve logging for class
             ):
                 # Normalize to (-1.0, 1.0) if converting to float
                 buffer_np /= (2 ** (8 * sample_format.width)) / 2
-            if (end_padding := cum_buffer.size - buffer_np.size) > 0:
-                buffer_np = np.pad(
-                    buffer_np, (0, end_padding), mode="constant"
-                )  # TODO: offset padding compensation
-            elif buffer_np.size > cum_buffer.size:
+            if (end_padding := mix_buffer.size - buffer_np.size) > 0:
+                # TODO: offset padding compensation
+                buffer_np = np.pad(buffer_np, (0, end_padding), mode="constant")
+            elif buffer_np.size > mix_buffer.size:
                 raise NotImplementedError  # TODO: Implement
-            cum_buffer += buffer_np
-        out_buffer: bytes = cum_buffer.tobytes()
+            mix_buffer += buffer_np
+        out_buffer: bytes = mix_buffer.tobytes()
 
-        write_to_async_pipe_sane(
-            self._ffmpeg_process, self._ffmpeg_process.stdin, out_buffer
-        )
+        await self._write_output(out_buffer)
 
     async def record_buffer(self, stream_buffer: StreamBuffer) -> None:
         """
@@ -298,6 +365,7 @@ class AudioRecorder:  # TODO: Improve logging for class
                 "Buffer too old or discarded time frame"
             )
             return
-        time_frame.buffers.append(
-            stream_buffer
-        )  # pylint: disable=undefined-loop-variable
+        time_frame.buffers.append(stream_buffer)
+
+
+AudioRecorder = BusAudioRecorder  # for backwards compatibility
