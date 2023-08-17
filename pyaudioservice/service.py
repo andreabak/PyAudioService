@@ -446,7 +446,7 @@ class OutputStreamHandler(StreamHandler):
         return audio_data
 
 
-def write_to_async_pipe_sane(
+async def write_to_async_pipe_sane(
     process: Process, pipe: Optional[asyncio.StreamWriter], data: bytes
 ) -> None:
     """
@@ -456,6 +456,7 @@ def write_to_async_pipe_sane(
     :param data: the binary data to write
     :raise BrokenPipeError: if couldn't write to the pipe
     """
+    # FIXME: sometimes the process is dead, but asyncio is unaware and still acts like all is ok
     if process.returncode is not None or not pipe or pipe.is_closing():
         raise BrokenPipeError("Subprocess pipe is closed")
     try:
@@ -1182,7 +1183,7 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
                         dont_raise=True
                     ):
                         break
-                    write_to_async_pipe_sane(
+                    await write_to_async_pipe_sane(
                         ffmpeg_process, ffmpeg_process.stdin, input_chunk
                     )
                     await asyncio.sleep(sleep_time)

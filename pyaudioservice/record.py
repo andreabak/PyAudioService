@@ -193,7 +193,7 @@ class AudioRecorderBase(ABC):
 
     async def _write_output(self, out_buffer: bytes):
         assert self._ffmpeg_process is not None
-        write_to_async_pipe_sane(
+        await write_to_async_pipe_sane(
             self._ffmpeg_process, self._ffmpeg_process.stdin, out_buffer
         )
 
