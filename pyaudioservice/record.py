@@ -20,12 +20,14 @@ from typing import (
     Deque,
     AsyncContextManager,
     ContextManager,
+    IO,
 )
 
 import ffmpeg
 import numpy as np
 
 from .common import ref_clock
+from .convert import ResampleStreamReader
 from .datatypes import PCMSampleFormat, PCMFormat
 from .service import (
     StreamBuffer,
@@ -41,6 +43,7 @@ __all__ = [
     "AudioRecorderBase",
     "BusAudioRecorder",
     "AudioRecorder",
+    "StreamAudioRecorder",
 ]
 
 
@@ -369,3 +372,54 @@ class BusAudioRecorder(AudioRecorderBase):
 
 
 AudioRecorder = BusAudioRecorder  # for backwards compatibility
+
+
+class StreamAudioRecorder(AudioRecorderBase):
+    """
+    Audio recorder implementation that records audio from a binary stream.
+    """
+
+    def __init__(
+        self,
+        out_file_path: str,
+        stream: IO[bytes],
+        pcm_format: Optional[PCMFormat] = None,
+        encoder_options: Optional[MutableMapping[str, Any]] = None,
+        event_loop: Optional[asyncio.AbstractEventLoop] = None,
+    ):
+        """
+        Constructor for `StreamAudioRecorder`
+        :param out_file_path: path for the recorded audio file
+        :param stream: the binary stream to record from
+        :param pcm_format: the PCM format used for the output recorded audio file
+            (sample format might be ignored). If omitted, the default PCM format
+            will be used instead.
+        :param encoder_options: FFmpeg audio encoder commandline options.
+            If omitted the default ones will be used.
+        :param event_loop: the asyncio event loop to use for recording.
+        """
+        super().__init__(
+            out_file_path=out_file_path,
+            pcm_format=pcm_format,
+            encoder_options=encoder_options,
+            event_loop=event_loop,
+        )
+        if pcm_format != self.INTERNAL_FORMAT:
+            stream = ResampleStreamReader(stream, pcm_format, self.INTERNAL_FORMAT)
+        self._stream: IO[bytes] = stream
+
+    @asynccontextmanager
+    async def _make_recording_context(self) -> AsyncContextManager:
+        try:
+            yield
+        finally:
+            await self._close_recording()
+
+    async def _record_step(self, tick: float):
+        """
+        Internal coroutine that handles buffers merging and saving,
+        piping to FFmpeg for the given time frame.
+        :param time_frame: the `StreamBuffersTimeFrame` time frame object to save
+        """
+        while data := self._stream.read(self._frame_size * self.INTERNAL_FORMAT.width):
+            await self._write_output(data)
