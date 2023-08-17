@@ -33,6 +33,7 @@ from .service import (
     AudioService,
     CHUNK_FRAMES,
     write_to_async_pipe_sane,
+    async_ffmpeg_subprocess,
 )
 
 
@@ -156,8 +157,11 @@ class AudioRecorder:  # TODO: Improve logging for class
         )
         ffmpeg_context: AsyncContextManager[
             Process
-        ] = self._audio_service.ffmpeg_subprocess(
-            ffmpeg_spec, stdin=subprocess.PIPE, kill_timeout=5.0
+        ] = async_ffmpeg_subprocess(
+            ffmpeg_spec,
+            stdin=subprocess.PIPE,
+            kill_timeout=5.0,
+            exiting_callback=self.stop_event.is_set,
         )
         async with ffmpeg_context as ffmpeg_process:
             self._ffmpeg_process = ffmpeg_process

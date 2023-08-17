@@ -63,6 +63,7 @@ __all__ = [
     "AudioDevicesInfoType",
     "write_to_async_pipe_sane",
     "read_from_async_pipe_sane",
+    "async_ffmpeg_subprocess",
     "BusListenerCallback",
     "BusListenerHandle",
     "AudioService",
@@ -516,6 +517,91 @@ def close_protocol_with_transport(protocol: Any, force: bool = False) -> None:
             pass
 
 
+@asynccontextmanager
+async def async_ffmpeg_subprocess(
+    ffmpeg_spec: ffmpeg.Stream,
+    stdin: Union[int, IO, None] = None,
+    stdout: Union[int, IO, None] = None,
+    stderr: Union[int, IO, None] = None,
+    kill_timeout: Optional[float] = None,
+    error_callback: Optional[Callable[[Exception], Any]] = None,
+    exiting_callback: Optional[Callable[[], bool]] = None,
+) -> AsyncContextManager[Process]:
+    """
+    Async context manager utility method to wrap a FFmpeg process
+    :param ffmpeg_spec: a `Stream` object from ffmpeg-python library
+        specifying the runtime options for FFmpeg
+    :param stdin: the stdin argument for the subprocess call.
+        If omitted, defaults to `subprocess.DEVNULL`
+    :param stdout: the stdout argument for the subprocess call.
+        If omitted, defaults to `subprocess.DEVNULL`
+    :param stderr: the stderr argument for the subprocess call.
+        If omitted, defaults to `subprocess.DEVNULL`
+    :param kill_timeout: the timeout in seconds to wait for the FFmpeg
+        process to end before killing it. If omitted or None, it waits until
+        the FFmpeg process ends on its own.
+    :param error_callback: a callback to send errors caught during the
+        process termination phase
+    :param exiting_callback: a callback to check if the calling program is exiting.
+    :return: yields the FFmpeg process
+    """
+    if stdin is None:
+        stdin = subprocess.DEVNULL
+    if stdout is None:
+        stdout = subprocess.DEVNULL
+    if stderr is None:
+        stderr = subprocess.DEVNULL
+    ffmpeg_exec: str = "ffmpeg"
+    ffmpeg_args: List[str] = ffmpeg.get_args(ffmpeg_spec)
+    ffmpeg_process: Process = await asyncio.create_subprocess_exec(
+        ffmpeg_exec,
+        *ffmpeg_args,
+        stdin=stdin,
+        stdout=stdout,
+        stderr=stderr,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+    )
+    caught_exception: Optional[Exception] = None
+    error_msg: str
+    try:
+        yield ffmpeg_process
+    except Exception as exc:
+        is_broken_pipe: bool = isinstance(exc, BrokenPipeError)
+        if is_broken_pipe:
+            error_msg = f"FFmpeg pipes broken: {exc}"
+        else:
+            error_msg = f"Got exception within FFmpeg context: {exc}"
+        logger.debug(error_msg)
+        caught_exception = exc
+        if not is_broken_pipe:
+            raise
+    finally:
+        logger.debug("FFmpeg terminating")
+        ffmpeg_retcode: Optional[int] = None
+        did_timeout: bool = False
+        try:
+            ffmpeg_retcode = await asyncio.wait_for(ffmpeg_process.wait(), kill_timeout)
+        except asyncio.TimeoutError:
+            did_timeout = True
+        if did_timeout or ffmpeg_retcode != 0:  # TODO: Retrieve stderr?
+            if did_timeout:
+                error_msg = f"FFmpeg still running after {kill_timeout}s, killing it"
+            else:
+                error_msg = f"FFmpeg exited with return code {ffmpeg_retcode}"
+            logger.debug(error_msg)
+            if did_timeout:
+                ffmpeg_process.kill()
+            if error_callback:
+                error_callback(RuntimeError(error_msg))
+        if caught_exception is not None or (
+            callable(exiting_callback) and exiting_callback()
+        ):
+            logger.debug("Force closing subprocess transports")
+            close_protocol_with_transport(ffmpeg_process.stdin, force=True)
+            close_protocol_with_transport(ffmpeg_process.stdout, force=True)
+            close_protocol_with_transport(ffmpeg_process.stderr, force=True)
+
+
 AudioDeviceIndexType = int
 
 
@@ -937,91 +1023,6 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
             await self._pa_playback(stream_handler)
 
     @asynccontextmanager
-    async def ffmpeg_subprocess(
-        self,
-        ffmpeg_spec: ffmpeg.Stream,
-        stdin: Union[int, IO, None] = None,
-        stdout: Union[int, IO, None] = None,
-        stderr: Union[int, IO, None] = None,
-        kill_timeout: Optional[float] = None,
-        error_callback: Optional[Callable[[Exception], Any]] = None,
-    ) -> AsyncContextManager[Process]:
-        """
-        Async context manager utility method to wrap a FFmpeg process
-        :param ffmpeg_spec: a `Stream` object from ffmpeg-python library
-            specifying the runtime options for FFmpeg
-        :param stdin: the stdin argument for the subprocess call.
-            If omitted, defaults to `subprocess.DEVNULL`
-        :param stdout: the stdout argument for the subprocess call.
-            If omitted, defaults to `subprocess.DEVNULL`
-        :param stderr: the stderr argument for the subprocess call.
-            If omitted, defaults to `subprocess.DEVNULL`
-        :param kill_timeout: the timeout in seconds to wait for the FFmpeg
-            process to end before killing it. If omitted or None, it waits until
-            the FFmpeg process ends on its own.
-        :param error_callback: a callback to send errors caught during the
-            process termination phase
-        :return: yields the FFmpeg process
-        """
-        if stdin is None:
-            stdin = subprocess.DEVNULL
-        if stdout is None:
-            stdout = subprocess.DEVNULL
-        if stderr is None:
-            stderr = subprocess.DEVNULL
-        ffmpeg_exec: str = "ffmpeg"
-        ffmpeg_args: List[str] = ffmpeg.get_args(ffmpeg_spec)
-        ffmpeg_process: Process = await asyncio.create_subprocess_exec(
-            ffmpeg_exec,
-            *ffmpeg_args,
-            stdin=stdin,
-            stdout=stdout,
-            stderr=stderr,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-        )
-        caught_exception: Optional[Exception] = None
-        error_msg: str
-        try:
-            yield ffmpeg_process
-        except Exception as exc:
-            is_broken_pipe: bool = isinstance(exc, BrokenPipeError)
-            if is_broken_pipe:
-                error_msg = f"FFmpeg pipes broken: {exc}"
-            else:
-                error_msg = f"Got exception within FFmpeg context: {exc}"
-            logger.debug(error_msg)
-            caught_exception = exc
-            if not is_broken_pipe:
-                raise
-        finally:
-            logger.debug("FFmpeg terminating")
-            ffmpeg_retcode: Optional[int] = None
-            did_timeout: bool = False
-            try:
-                ffmpeg_retcode = await asyncio.wait_for(
-                    ffmpeg_process.wait(), kill_timeout
-                )
-            except asyncio.TimeoutError:
-                did_timeout = True
-            if did_timeout or ffmpeg_retcode != 0:  # TODO: Retrieve stderr?
-                if did_timeout:
-                    error_msg = (
-                        f"FFmpeg still running after {kill_timeout}s, killing it"
-                    )
-                else:
-                    error_msg = f"FFmpeg exited with return code {ffmpeg_retcode}"
-                logger.debug(error_msg)
-                if did_timeout:
-                    ffmpeg_process.kill()
-                if error_callback:
-                    error_callback(RuntimeError(error_msg))
-            if caught_exception is not None or self.check_exiting(dont_raise=True):
-                logger.debug("Force closing subprocess transports")
-                close_protocol_with_transport(ffmpeg_process.stdin, force=True)
-                close_protocol_with_transport(ffmpeg_process.stdout, force=True)
-                close_protocol_with_transport(ffmpeg_process.stderr, force=True)
-
-    @asynccontextmanager
     async def _ffmpeg_decoder(
         self,
         input_args: MutableMapping[str, Any],
@@ -1042,12 +1043,13 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
         ffmpeg_spec: ffmpeg.Stream = ffmpeg.input(**input_args).output(
             "pipe:", **pcm_format.ffmpeg_args
         )
-        async with self.ffmpeg_subprocess(
+        async with async_ffmpeg_subprocess(
             ffmpeg_spec,
             stdin=subprocess.PIPE if pipe_stdin else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             kill_timeout=2.0,
             error_callback=stream_handler.set_error,
+            exiting_callback=partial(self.check_exiting, dont_raise=True),
         ) as ffmpeg_process:
 
             def read_stdout_pipe(frame_count: int) -> bytes:
@@ -1064,6 +1066,9 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
                         ffmpeg_process, ffmpeg_process.stdout, bytes_to_read
                     )
                     try:
+                        # TODO: this being blocking is probably not good.
+                        #       There must be a better way to pass data.
+                        #       It's possible PyAudio doesn't care? Maybe it's threaded?
                         read_bytes: bytes = asyncio.run_coroutine_threadsafe(
                             read_coro, self._loop
                         ).result()
@@ -1082,6 +1087,7 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
                     buffer += read_bytes
                 return buffer
 
+            # TODO: should this be done here?
             stream_handler.read_callback = read_stdout_pipe
             stream_handler.pcm_format = pcm_format
             playback_task: asyncio.Task = self._loop.create_task(
