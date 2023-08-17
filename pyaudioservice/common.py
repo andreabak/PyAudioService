@@ -1,8 +1,12 @@
 """Module with common functions and classes"""
 import time
 from abc import ABC, abstractmethod
+from os import PathLike
 from threading import Event, Thread
-from typing import TypeVar, Sequence, Iterator, Callable
+from typing import TypeVar, Sequence, Iterator, Callable, Union
+
+
+PathType = Union[bytes, str, PathLike]
 
 
 ref_clock: Callable[[], float] = time.perf_counter

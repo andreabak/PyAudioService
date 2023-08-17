@@ -26,7 +26,7 @@ from typing import (
 import ffmpeg
 import numpy as np
 
-from .common import ref_clock
+from .common import ref_clock, PathType
 from .convert import ResampleStreamReader
 from .datatypes import PCMSampleFormat, PCMFormat
 from .service import (
@@ -67,8 +67,8 @@ class AudioRecorderBase(ABC):
 
     def __init__(
         self,
-        out_file_path: str,
         pcm_format: Optional[PCMFormat] = None,
+        out_file_path: PathType,
         encoder_options: Optional[MutableMapping[str, Any]] = None,
         event_loop: Optional[asyncio.AbstractEventLoop] = None,
     ):
@@ -84,10 +84,10 @@ class AudioRecorderBase(ABC):
         self._event_loop: asyncio.AbstractEventLoop = (
             event_loop if event_loop is not None else asyncio.get_running_loop()
         )
-        self._out_file_path: str = out_file_path
         if pcm_format is None:
             pcm_format = DEFAULT_FORMAT
         self._pcm_format: PCMFormat = pcm_format
+        self._out_file_path: str = str(out_file_path)
         if encoder_options is None:
             encoder_options = self.DEFAULT_ENCODER_OPTIONS
         self._encoder_options: MutableMapping[str, Any] = encoder_options
@@ -96,6 +96,11 @@ class AudioRecorderBase(ABC):
         self._ffmpeg_process: Optional[Process] = None
         self._recording: bool = False
         self._stop_event: Event = Event()
+
+    @property
+    def out_file_path(self) -> str:
+        """The path for the recorded audio file"""
+        return self._out_file_path
 
     @property
     def stop_event(self) -> Event:
@@ -231,7 +236,7 @@ class BusAudioRecorder(AudioRecorderBase):
     def __init__(
         self,
         audio_service: AudioService,
-        out_file_path: str,
+        out_file_path: PathType,
         source_buses: Union[Sequence[str], str],
         pcm_format: Optional[PCMFormat] = None,
         encoder_options: Optional[MutableMapping[str, Any]] = None,
@@ -381,9 +386,9 @@ class StreamAudioRecorder(AudioRecorderBase):
 
     def __init__(
         self,
-        out_file_path: str,
         stream: IO[bytes],
         pcm_format: Optional[PCMFormat] = None,
+        out_file_path: PathType,
         encoder_options: Optional[MutableMapping[str, Any]] = None,
         event_loop: Optional[asyncio.AbstractEventLoop] = None,
     ):
