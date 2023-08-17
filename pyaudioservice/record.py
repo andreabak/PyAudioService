@@ -392,6 +392,7 @@ class StreamAudioRecorder(AudioRecorderBase):
         out_pcm_format: Optional[PCMFormat] = None,
         encoder_options: Optional[MutableMapping[str, Any]] = None,
         event_loop: Optional[asyncio.AbstractEventLoop] = None,
+        close_stream: bool = True,
     ):
         """
         Constructor for `StreamAudioRecorder`
@@ -404,6 +405,7 @@ class StreamAudioRecorder(AudioRecorderBase):
         :param encoder_options: FFmpeg audio encoder commandline options.
             If omitted the default ones will be used.
         :param event_loop: the asyncio event loop to use for recording.
+        :param close_stream: whether to close the input stream when terminating the recording.
         """
         super().__init__(
             out_file_path=out_file_path,
@@ -417,6 +419,7 @@ class StreamAudioRecorder(AudioRecorderBase):
                 stream, self._pcm_format, self._out_pcm_format
             )
         self._stream: IO[bytes] = stream
+        self._close_stream: bool = close_stream
 
     @asynccontextmanager
     async def _make_recording_context(self) -> AsyncContextManager:
@@ -424,6 +427,8 @@ class StreamAudioRecorder(AudioRecorderBase):
             yield
         finally:
             await self._close_recording()
+            if self._close_stream:
+                self._stream.close()
 
     async def _record_step(self, tick: float):
         """
