@@ -7,7 +7,7 @@ import subprocess
 from abc import ABC, abstractmethod
 from asyncio.subprocess import Process
 from collections import deque
-from contextlib import ExitStack, contextmanager, nullcontext, asynccontextmanager
+from contextlib import ExitStack, nullcontext, asynccontextmanager
 from dataclasses import dataclass, field as dataclass_field
 from threading import Event
 from typing import (
@@ -19,7 +19,6 @@ from typing import (
     Sequence,
     Deque,
     AsyncContextManager,
-    ContextManager,
     IO,
 )
 
@@ -92,6 +91,8 @@ class AudioRecorderBase(ABC):
             encoder_options = self.DEFAULT_ENCODER_OPTIONS
         self._encoder_options: MutableMapping[str, Any] = encoder_options
 
+        self._recording_task: Optional[asyncio.Task] = None
+
         self._frame_size: int = CHUNK_FRAMES
         self._ffmpeg_process: Optional[Process] = None
         self._recording: bool = False
@@ -107,28 +108,36 @@ class AudioRecorderBase(ABC):
         """Internal Event that signals recording to stop"""
         return self._stop_event
 
-    def start(self) -> None:
+    async def start(self) -> None:
         """Start the audio recording"""
         if self._recording:
             logger.warning("Audio recording already active!")
             return
-        self._event_loop.create_task(self._start_recording())
+        self._recording_task = self._event_loop.create_task(self._start_recording())
 
-    def stop(self) -> None:
+    async def stop(self) -> None:
         """Stop the audio recording"""
         self._stop_event.set()
 
+        if self._recording_task is not None and not self._recording_task.done():
+            try:
+                await asyncio.wait_for(self._recording_task, timeout=2.0)
+            except asyncio.TimeoutError:
+                self._recording_task.cancel()
+                await asyncio.wait_for(self._recording_task, timeout=1.0)
+                logger.warning(
+                    "Audio recording task did not stop in time, exiting anyway"
+                )
+
+    async def __aenter__(self):
+        await self.start()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.stop()
+
     async def _check_exiting(self):
         return self._stop_event.is_set()
-
-    @contextmanager
-    def record(self) -> ContextManager:
-        """Context manager utility method to start and stop recording"""
-        self.start()
-        try:
-            yield
-        finally:
-            self.stop()
 
     async def _start_recording(self) -> None:
         """
@@ -174,20 +183,19 @@ class AudioRecorderBase(ABC):
         try:
             async with self._make_recording_context():
                 while True:
-                    tick: float = (
-                        start_time if last_tick is None else last_tick + time_step
-                    )
-
                     if await self._check_exiting():
                         raise SystemExit
 
+                    tick: float = (
+                        start_time if last_tick is None else last_tick + time_step
+                    )
                     await self._record_step(tick)
 
                     sleep_delay: float = tick - ref_clock() + time_step
                     # TODO: log infrequently
                     if (time_shift := time_step - sleep_delay) > time_step:
                         logger.debug(
-                            f"Got {time_shift*1000:.2f}ms time shift on recording loop"
+                            f"Got {time_shift * 1000:.2f}ms time shift on recording loop"
                         )
                     await asyncio.sleep(max(0.0, sleep_delay))
                     last_tick = tick
@@ -277,7 +285,7 @@ class BusAudioRecorder(AudioRecorderBase):
 
         self._time_frames: Deque[StreamBuffersTimeFrame] = deque()
 
-    def start(self) -> None:
+    async def start(self) -> None:
         """Start the audio recording"""
         logger.info(
             f'Starting recording for {"+".join(self._source_buses)} '
