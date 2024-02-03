@@ -6,6 +6,7 @@ import asyncio
 import enum
 import logging
 import subprocess
+import sys
 import time
 import uuid
 import wave
@@ -561,14 +562,20 @@ async def async_ffmpeg_subprocess(
         stderr = subprocess.DEVNULL
     ffmpeg_exec: str = "ffmpeg"
     ffmpeg_args: List[str] = ffmpeg.get_args(ffmpeg_spec)
-    ffmpeg_process: Process = await asyncio.create_subprocess_exec(
-        ffmpeg_exec,
-        *ffmpeg_args,
-        stdin=stdin,
-        stdout=stdout,
-        stderr=stderr,
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-    )
+    process_kwargs = {}
+    if sys.platform == "win32":
+        process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    try:
+        ffmpeg_process: Process = await asyncio.create_subprocess_exec(
+            ffmpeg_exec,
+            *ffmpeg_args,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            **process_kwargs,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Error starting FFmpeg process: {exc}") from exc
     caught_exception: Optional[Exception] = None
     error_msg: str
     try:
@@ -1247,6 +1254,8 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
         :return: the `OutputStreamHandler` associated with the playback stream
         """
         # noinspection PyTypeChecker
+        # FIXME: do not use ffmpeg for PCM audio, incurring in subprocess overhead penalty,
+        #        n.b PyAudio/PortAudio can handle conversion internally
         playback_callable: PlaybackCallable = partial(
             self._play_ffmpeg_piped,
             audio=audio,
