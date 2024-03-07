@@ -400,14 +400,23 @@ class BufferedAudioData:
             return self._data_buffer.tell()
 
     @property
+    def frames(self) -> int:
+        """
+        Get the number of frames in the buffer.
+        This is calculated dividing the total buffer size in bytes
+        by `sample_width` and `channels`.
+        :return: The number of frames, in integer
+        """
+        return len(self) // self.pcm_format.width // self.pcm_format.channels
+
+    @property
     def seconds(self) -> float:
         """
         Get the length in seconds of the audio data stored in the buffer.
-        This is calculated dividing the total buffer size in bytes
-        by `sample_width` and `sample_rate`.
+        This is calculated dividing the number of frames by the `sample_rate`.
         :return: The length in seconds, in float
         """
-        return len(self) / self.pcm_format.width / self.pcm_format.rate
+        return self.frames / self.pcm_format.rate
 
     def get_whole(self) -> bytes:
         """
