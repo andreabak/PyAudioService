@@ -526,6 +526,23 @@ def close_protocol_with_transport(protocol: Any, force: bool = False) -> None:
             pass
 
 
+def check_ffmpeg():
+    """
+    Check if ffmpeg is available and loads correctly.
+
+    :raise RuntimeError: if ffmpeg is not found or fails to load
+    """
+    result = subprocess.run(
+        ["ffmpeg", "-version"], stderr=subprocess.PIPE, stdout=subprocess.PIPE
+    )
+    if result.returncode != 0:
+        logger.error(
+            "FFmpeg not found or failed to load:\n%s",
+            b"\n".join(o for o in (result.stdout, result.stderr) if o).decode(),
+        )
+        raise RuntimeError("FFmpeg not found or failed to load")
+
+
 @asynccontextmanager
 async def async_ffmpeg_subprocess(
     ffmpeg_spec: ffmpeg.Stream,
@@ -777,6 +794,7 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
         :param output_device_index: The PortAudio output device index to use for
             output streams. If omitted, the default system's output device is used.
         """
+        check_ffmpeg()
         self._loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
         super().__init__()
         self.input_device_index: Optional[int] = input_device_index
