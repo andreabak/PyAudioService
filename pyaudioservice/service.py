@@ -200,6 +200,8 @@ class StreamHandler(ABC):
         self._bus: str = bus
         self.pcm_format: Optional[PCMFormat] = pcm_format
 
+        self._done_callbacks: List[Callable[[StreamHandler], ...]] = []
+
         self._done_event: Event = Event()
         self._done_event.clear()
         self._stop_event: Event = Event()
@@ -232,6 +234,19 @@ class StreamHandler(ABC):
         :return: the audio data in bytes for output (if an output stream)
             or the input audio data (same as in_data)
         """
+
+    def add_done_callback(self, callback: Callable[[StreamHandler], ...]) -> None:
+        """
+        Add a callback to be called when the stream stops
+        :param callback: the callback to add
+        """
+        self._done_callbacks.append(callback)
+
+    def _call_done_callbacks(self) -> None:
+        """Call all stop callbacks"""
+        while self._done_callbacks:
+            callback = self._done_callbacks.pop()
+            callback(self)
 
     # noinspection PyUnusedLocal
     def pa_callback(
@@ -324,6 +339,16 @@ class StreamHandler(ABC):
     def success(self) -> bool:
         """True if audio stream is finished and no errors were caught, else False"""
         return self._done_event.is_set() and self.stream_error is None
+
+    def set_stop(self) -> None:
+        """Set the stop event for the stream"""
+        self._stop_event.set()
+
+    def set_done(self) -> None:
+        """Set the done event for the stream. Implies the stop event is also set"""
+        self.set_stop()
+        self._done_event.set()
+        self._call_done_callbacks()
 
     def set_error(self, error: Exception) -> None:
         """Store an error related to the stream handler instance"""
@@ -985,8 +1010,7 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
             logger.error(f"Error in PyAudio stream: {exc}", exc_info=True)
             stream_handler.set_error(exc)
         finally:
-            stream_handler.done_event.set()
-            stream_handler.stop_event.set()
+            stream_handler.set_done()
 
     async def _pa_acquire(self, stream_handler: InputStreamHandler) -> None:
         """
@@ -1025,7 +1049,7 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
             stream_handler.set_error(exc)
             raise
         finally:
-            stream_handler.stop_event.set()
+            stream_handler.set_stop()
 
     async def _pa_playback(self, stream_handler: OutputStreamHandler) -> None:
         """
@@ -1139,7 +1163,7 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
                 while True:
                     ffmpeg_retcode = ffmpeg_process.returncode
                     if playback_task.done() or ffmpeg_retcode not in (None, 0):
-                        stream_handler.stop_event.set()
+                        stream_handler.set_stop()
                         break
                     await asyncio.sleep(0.1)
                 close_protocol_with_transport(ffmpeg_process.stdout)
