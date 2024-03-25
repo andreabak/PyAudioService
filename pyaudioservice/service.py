@@ -198,7 +198,7 @@ class StreamHandler(ABC):
         """
         self._audio_service: AudioService = audio_service
         self._bus: str = bus
-        self.pcm_format: Optional[PCMFormat] = pcm_format
+        self._pcm_format: Optional[PCMFormat] = pcm_format
 
         self._done_callbacks: List[Callable[[StreamHandler], ...]] = []
 
@@ -214,6 +214,20 @@ class StreamHandler(ABC):
     @abstractmethod
     def direction(self) -> StreamDirection:
         """The direction of the stream"""
+
+    @property
+    def pcm_format(self) -> PCMFormat:
+        """The `PCMFormat` for the stream"""
+        if self._pcm_format is None:
+            raise ValueError("PCM format not set for stream")
+        return self._pcm_format
+
+    @pcm_format.setter
+    def pcm_format(self, pcm_format: PCMFormat) -> None:
+        """Set the PCM format for the stream"""
+        if self._pcm_format is not None and self._pcm_format != pcm_format:
+            raise ValueError("Cannot change PCM format once set")
+        self._pcm_format = pcm_format
 
     @abstractmethod
     def _retrieve_audio_data(
@@ -267,7 +281,7 @@ class StreamHandler(ABC):
         :return: the audio data in bytes for output (if an output stream).
             None if the stream is not an output stream.
         """
-        if self.pcm_format is None:
+        if self._pcm_format is None:
             logger.error(
                 f"Tried starting audio stream, "
                 f"but pcm_format was never specified for {self.__class__.__name__}"
@@ -296,10 +310,10 @@ class StreamHandler(ABC):
         if not stream_buffer.check_size():
             logger.debug(
                 f"Audio buffer has bad size "
-                f"(expected {len(audio_data)} % {self.pcm_format.width})"
+                f"(expected {len(audio_data)} % {self._pcm_format.width})"
             )
         self._audio_service.route_buffer(stream_buffer)
-        self._done_frames += len(audio_data) // self.pcm_format.width
+        self._done_frames += len(audio_data) // self._pcm_format.width
         if self.direction == StreamDirection.INPUT:
             return None, pyaudio.paContinue
         elif self.direction == StreamDirection.OUTPUT:
@@ -418,7 +432,7 @@ class InputStreamHandler(StreamHandler):
     ) -> bytes:
         audio_data: bytes = in_data
         if self.write_callback is not None and callable(self.write_callback):
-            self.write_callback(audio_data, self.pcm_format)
+            self.write_callback(audio_data, self._pcm_format)
         return audio_data
 
 
