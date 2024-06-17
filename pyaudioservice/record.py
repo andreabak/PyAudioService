@@ -136,6 +136,20 @@ class AudioRecorderBase(ABC):
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.stop()
 
+    @property
+    def recording(self) -> bool:
+        return self._recording_task is not None and not self._recording_task.done() and self._recording
+
+    @property
+    def exception(self) -> Optional[BaseException]:
+        if self._recording_task is None:
+            return None
+        else:
+            try:
+                return self._recording_task.exception()
+            except asyncio.InvalidStateError:
+                return None
+
     async def _check_exiting(self):
         return self._stop_event.is_set()
 
@@ -156,6 +170,7 @@ class AudioRecorderBase(ABC):
         ffmpeg_context: AsyncContextManager[Process] = async_ffmpeg_subprocess(
             ffmpeg_spec,
             stdin=subprocess.PIPE,
+            suppress_broken_pipe=False,
             kill_timeout=5.0,
             exiting_callback=self.stop_event.is_set,
         )
@@ -199,7 +214,9 @@ class AudioRecorderBase(ABC):
                         )
                     await asyncio.sleep(max(0.0, sleep_delay))
                     last_tick = tick
-        except:
+        except Exception as exc:
+            if isinstance(exc, BrokenPipeError) and self._stop_event.is_set():
+                pass
             logger.exception("Error in recording loop")
             raise
         finally:
@@ -207,12 +224,13 @@ class AudioRecorderBase(ABC):
 
     async def _write_output(self, out_buffer: bytes):
         assert self._ffmpeg_process is not None
+        logger.debug(f"Writing {len(out_buffer)} bytes to ffmpeg")
         await write_to_async_pipe_sane(
             self._ffmpeg_process, self._ffmpeg_process.stdin, out_buffer
         )
 
     async def _close_recording(self):
-        await self._write_output(b"\0")
+        # await self._write_output(b"\0")  # FIXME: remove this probably makes no sense.
         self._ffmpeg_process.stdin.close()
 
     async def _make_recording_context(self) -> AsyncContextManager:

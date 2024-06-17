@@ -585,9 +585,11 @@ def check_ffmpeg():
 @asynccontextmanager
 async def async_ffmpeg_subprocess(
     ffmpeg_spec: ffmpeg.Stream,
+    *,
     stdin: Union[int, IO, None] = None,
     stdout: Union[int, IO, None] = None,
     stderr: Union[int, IO, None] = None,
+    suppress_broken_pipe: bool = True,
     kill_timeout: Optional[float] = None,
     error_callback: Optional[Callable[[Exception], Any]] = None,
     exiting_callback: Optional[Callable[[], bool]] = None,
@@ -602,6 +604,8 @@ async def async_ffmpeg_subprocess(
         If omitted, defaults to `subprocess.DEVNULL`
     :param stderr: the stderr argument for the subprocess call.
         If omitted, defaults to `subprocess.DEVNULL`
+    :param suppress_broken_pipe: if True, do not raise errors related to writing
+        to a closed pipe (early ffmpeg termination).
     :param kill_timeout: the timeout in seconds to wait for the FFmpeg
         process to end before killing it. If omitted or None, it waits until
         the FFmpeg process ends on its own.
@@ -644,7 +648,7 @@ async def async_ffmpeg_subprocess(
             error_msg = f"Got exception within FFmpeg context: {exc}"
         logger.debug(error_msg)
         caught_exception = exc
-        if not is_broken_pipe:
+        if not (suppress_broken_pipe and is_broken_pipe):
             raise
     finally:
         logger.debug("FFmpeg terminating")
