@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import io
 import logging
 import subprocess
 import sys
@@ -1279,6 +1280,32 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
         ):
             pass
 
+    async def _play_pcm_data(
+        self,
+        audio: Union[bytes, IO],
+        pcm_format: PCMFormat,
+        stream_handler: OutputStreamHandler,
+    ) -> None:
+        """
+        Start a playback stream for PCM audio data in a binary stream or bytes string
+        :param audio: the audio buffer (stream) object or bytes string
+        :param pcm_format: the PCM format for the input audio data
+        :param stream_handler: an instantiated `OutputStreamHandler` to associate
+            to the output stream
+        """
+        self.ensure_running()
+
+        if isinstance(audio, (bytes, bytearray)):
+            audio = io.BytesIO(audio)
+
+        def read_frames(count: int) -> bytes:
+            size = count * pcm_format.width
+            return audio.read(size)
+
+        stream_handler.pcm_format = pcm_format
+        stream_handler.read_callback = read_frames
+        await self._pa_playback(stream_handler)
+
     def _play_stream(
         self, playback_callable: PlaybackCallable, blocking: bool
     ) -> OutputStreamHandler:
@@ -1314,14 +1341,25 @@ class AudioService(BackgroundService):  # TODO: Improve logging for class
         :return: the `OutputStreamHandler` associated with the playback stream
         """
         # noinspection PyTypeChecker
-        # FIXME: do not use ffmpeg for PCM audio, incurring in subprocess overhead penalty,
-        #        n.b PyAudio/PortAudio can handle conversion internally
-        playback_callable: PlaybackCallable = partial(
-            self._play_ffmpeg_piped,
-            audio=audio,
-            codec=codec,
-            data_pcm_format=data_pcm_format,
-        )
+        if (codec is None) == (data_pcm_format is None):
+            raise ValueError("One and only one of `codec` or `data_pcm_format` must be specified.")
+        playback_callable: PlaybackCallable
+        if codec is not None:
+            assert data_pcm_format is None
+            playback_callable = partial(
+                self._play_ffmpeg_piped,
+                audio=audio,
+                codec=codec,
+            )
+        elif data_pcm_format is not None:
+            assert codec is None
+            playback_callable = partial(
+                self._play_pcm_data,
+                audio=audio,
+                pcm_format=data_pcm_format,
+            )
+        else:
+            raise SyntaxError("We should not be here")
         return self._play_stream(playback_callable, blocking=blocking)
 
     def play_file(self, filepath: str, blocking: bool = True) -> OutputStreamHandler:
